@@ -560,10 +560,11 @@ installbbr() {
 			kernel_version=$github_ver
 			detele_kernel_head
 			headurl=$(curl -s 'https://api.github.com/repos/ylx2016/kernel/releases' | grep "${github_tag}" | grep 'deb' | grep 'headers' | awk -F '"' '{print $4}')
-			imgurl=$(curl -s 'https://api.github.com/repos/ylx2016/kernel/releases' | grep "${github_tag}" | grep 'deb' | grep -v 'headers' | grep -v 'devel' | awk -F '"' '{print $4}')
+                        imgurl=$(curl -s 'https://api.github.com/repos/ylx2016/kernel/releases' | grep "${github_tag}" | grep 'deb' | grep 'linux-image' | awk -F '"' '{print $4}')
 
-			headurl=$(check_cn "$headurl")
-			imgurl=$(check_cn "$imgurl")
+                        check_empty "$imgurl"
+                        headurl=$(check_cn "$headurl")
+                        imgurl=$(check_cn "$imgurl")
 
 			download_file "$headurl" linux-headers-d10.deb
 			download_file "$imgurl" linux-image-d10.deb
@@ -577,7 +578,7 @@ installbbr() {
 			kernel_version=$github_ver
 			detele_kernel_head
 			headurl=$(curl -s 'https://api.github.com/repos/ylx2016/kernel/releases' | grep "${github_tag}" | grep 'deb' | grep 'headers' | awk -F '"' '{print $4}')
-			imgurl=$(curl -s 'https://api.github.com/repos/ylx2016/kernel/releases' | grep "${github_tag}" | grep 'deb' | grep -v 'headers' | grep -v 'devel' | awk -F '"' '{print $4}')
+                        imgurl=$(curl -s 'https://api.github.com/repos/ylx2016/kernel/releases' | grep "${github_tag}" | grep 'deb' | grep 'linux-image' | awk -F '"' '{print $4}')
 
 			check_empty "$imgurl"
 			headurl=$(check_cn "$headurl")
