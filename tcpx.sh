@@ -968,13 +968,16 @@ installcloud() {
 	# 清空临时映射文件
 	>"$VERSION_MAP_FILE"
 
-	# 提取 image 版本号并写入映射文件
-	while IFS= read -r file; do
-		if [[ "$file" =~ linux-image-([0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9]+)?) ]]; then
-			local ver="${BASH_REMATCH[1]}"
-			echo "$ver:$file" >>"$VERSION_MAP_FILE"
-		fi
-	done <<<"$DEB_FILES_RAW"
+        # 提取 image 版本号并写入映射文件，过滤掉带有 rc/exp 标签的实验性版本
+        while IFS= read -r file; do
+                if [[ "$file" == *"~rc"* || "$file" == *"~exp"* ]]; then
+                        continue
+                fi
+                if [[ "$file" =~ linux-image-([0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9]+)?) ]]; then
+                        local ver="${BASH_REMATCH[1]}"
+                        echo "$ver:$file" >>"$VERSION_MAP_FILE"
+                fi
+        done <<<"$DEB_FILES_RAW"
 
 	# 读取排序并去重后的版本号
 	mapfile -t VERSIONS < <(cut -d':' -f1 "$VERSION_MAP_FILE" | sort -V -u)
@@ -1319,28 +1322,73 @@ ensure_cloud_header_dependencies() {
                         ensure_gcc_for_host_package "$pkg" "$ver" "$deb_arch"
                         ;;
                 *)
-                        ensure_generic_dependency "$pkg"
+                        ensure_generic_dependency "$pkg" "$op" "$ver"
                         ;;
                 esac
         done < <(printf '%s' "$depends_field" | tr ',' '\n')
 }
 
+is_package_version_satisfied() {
+        local pkg="$1"
+        local op="$2"
+        local required_version="$3"
+
+        if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+                return 1
+        fi
+
+        if [ -z "$op" ] || [ -z "$required_version" ]; then
+                return 0
+        fi
+
+        local installed_version
+        installed_version=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)
+        if [ -z "$installed_version" ]; then
+                return 1
+        fi
+
+        if dpkg --compare-versions "$installed_version" "$op" "$required_version"; then
+                return 0
+        fi
+
+        return 1
+}
+
 ensure_generic_dependency() {
         local pkg="$1"
+        local op="$2"
+        local required_version="$3"
 
         if [ -z "$pkg" ]; then
                 return
         fi
 
-        if dpkg -s "$pkg" >/dev/null 2>&1; then
+        if is_package_version_satisfied "$pkg" "$op" "$required_version"; then
                 return
         fi
 
         if sudo apt-get install -y "$pkg"; then
-                return
+                if is_package_version_satisfied "$pkg" "$op" "$required_version"; then
+                        return
+                fi
         fi
 
-        echo "自动安装依赖 $pkg 失败，请手动处理。"
+        local installed_version=""
+        if dpkg -s "$pkg" >/dev/null 2>&1; then
+                installed_version=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)
+        fi
+
+        if [ -n "$op" ] && [ -n "$required_version" ]; then
+                local candidate_version
+                candidate_version=$(apt-cache policy "$pkg" 2>/dev/null | awk '/Candidate:/ {print $2}')
+                candidate_version=${candidate_version:-"(none)"}
+                installed_version=${installed_version:-"(none)"}
+                echo "依赖 $pkg 需要版本 $op $required_version。当前已安装: $installed_version，候选版本: $candidate_version。"
+                echo "当前系统的软件源无法满足此依赖，请选择较低版本的 cloud 内核或升级系统后重试。"
+        else
+                echo "自动安装依赖 $pkg 失败，请手动处理。"
+        fi
+
         exit 1
 }
 
