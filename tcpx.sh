@@ -270,7 +270,7 @@ kernel.pid_max=64000
 net.netfilter.nf_conntrack_max = 262144
 net.nf_conntrack_max = 262144
 ## Enable bbr
-net.core.default_qdisc = fq
+net.core.default_qdisc = cake
 net.ipv4.tcp_congestion_control = bbr
 net.ipv4.tcp_low_latency = 1
 EOF
@@ -1063,8 +1063,47 @@ ensure_cloud_predepends() {
         local dep
         while IFS=',' read -r dep; do
                 dep=$(echo "$dep" | xargs)
-                if [[ "$dep" =~ ^linux-base[[:space:]]*\(>=[[:space:]]*([^)]*)\)$ ]]; then
-                        local required_version="${BASH_REMATCH[1]}"
+                local first=""
+                local required_version=""
+                local expect_value=0
+                local token=""
+
+                for token in $dep; do
+                        if [ -z "$first" ]; then
+                                first="$token"
+                                case "$first" in
+                                linux-base*) ;;
+                                *)
+                                        break
+                                esac
+                                continue
+                        fi
+
+                        if [ "$expect_value" -eq 1 ]; then
+                                required_version="$token"
+                                break
+                        fi
+
+                        case "$token" in
+                        "(>=" )
+                                expect_value=1
+                                ;;
+                        "(>="*)
+                                required_version="${token#(>=}"
+                                break
+                                ;;
+                        esac
+                done
+
+                case "$first" in
+                linux-base*) ;;
+                *)
+                        continue
+                esac
+
+                required_version="${required_version%)}"
+                required_version=$(echo "$required_version" | xargs)
+                if [ -n "$required_version" ]; then
                         ensure_linux_base_version "$required_version"
                 fi
         done <<<"$pre_depends"
