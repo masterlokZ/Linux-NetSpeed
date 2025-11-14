@@ -1032,6 +1032,7 @@ installcloud() {
                         sudo apt install -y "linux-image-cloud-arm64" "linux-headers-cloud-arm64"
                 fi
         else
+                sudo apt-get update >/dev/null 2>&1 || sudo apt-get --allow-releaseinfo-change update >/dev/null 2>&1
                 # 下载并安装 image
                 echo "正在下载 $IMAGE_URL$IMAGE_DEB_FILE ..."
                 if ! download_deb_with_candidates "$IMAGE_DEB_FILE" "$IMAGE_URL"; then
@@ -1316,190 +1317,87 @@ ensure_cloud_header_dependencies() {
 
                 case "$pkg" in
                 linux-kbuild-*)
-                        ensure_linux_kbuild_package "$pkg" "$ver" "$deb_arch" "$revision_part"
+                        ensure_linux_kbuild_package "$pkg" "$ver"
                         ;;
                 gcc-[0-9][0-9]-for-host)
-                        ensure_gcc_for_host_package "$pkg" "$ver" "$deb_arch"
+                        ensure_gcc_for_host_package "$pkg" "$ver"
                         ;;
                 *)
-                        ensure_generic_dependency "$pkg" "$op" "$ver"
+                        ensure_generic_dependency "$pkg" "$ver"
                         ;;
                 esac
         done < <(printf '%s' "$depends_field" | tr ',' '\n')
 }
 
-is_package_version_satisfied() {
+apt_cache_candidate_version() {
         local pkg="$1"
-        local op="$2"
-        local required_version="$3"
-
-        if ! dpkg -s "$pkg" >/dev/null 2>&1; then
-                return 1
-        fi
-
-        if [ -z "$op" ] || [ -z "$required_version" ]; then
-                return 0
-        fi
-
-        local installed_version
-        installed_version=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)
-        if [ -z "$installed_version" ]; then
-                return 1
-        fi
-
-        if dpkg --compare-versions "$installed_version" "$op" "$required_version"; then
-                return 0
-        fi
-
-        return 1
+        apt-cache policy "$pkg" 2>/dev/null | awk -F': ' '/Candidate:/ {print $2; exit}'
 }
 
 ensure_generic_dependency() {
         local pkg="$1"
-        local op="$2"
-        local required_version="$3"
+        local min_version="$2"
+        local context="${3:-cloud headers}"
 
         if [ -z "$pkg" ]; then
                 return
         fi
 
-        if is_package_version_satisfied "$pkg" "$op" "$required_version"; then
-                return
-        fi
-
-        if sudo apt-get install -y "$pkg"; then
-                if is_package_version_satisfied "$pkg" "$op" "$required_version"; then
+        if dpkg -s "$pkg" >/dev/null 2>&1; then
+                if [ -n "$min_version" ]; then
+                        local installed_version
+                        installed_version=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)
+                        if [ -n "$installed_version" ] && dpkg --compare-versions "$installed_version" ge "$min_version"; then
+                                return
+                        fi
+                else
                         return
                 fi
         fi
 
-        local installed_version=""
-        if dpkg -s "$pkg" >/dev/null 2>&1; then
-                installed_version=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)
+        local candidate=""
+        candidate=$(apt_cache_candidate_version "$pkg")
+        if [ -z "$candidate" ] || [ "$candidate" = "(none)" ]; then
+                if [ -n "$min_version" ]; then
+                        echo "$context 所需的依赖 $pkg (>= $min_version) 在当前软件源中不可用，请选择较低版本的 cloud 内核或启用适当的软件源。"
+                else
+                        echo "$context 所需的依赖 $pkg 在当前软件源中不可用，请选择较低版本的 cloud 内核或启用适当的软件源。"
+                fi
+                exit 1
+        fi
+        if [ -n "$min_version" ] && ! dpkg --compare-versions "$candidate" ge "$min_version"; then
+                echo "$context 所需的依赖 $pkg 需要至少版本 $min_version，但当前软件源仅提供 $candidate。请选择较低版本的 cloud 内核或升级系统。"
+                exit 1
         fi
 
-        if [ -n "$op" ] && [ -n "$required_version" ]; then
-                local candidate_version
-                candidate_version=$(apt-cache policy "$pkg" 2>/dev/null | awk '/Candidate:/ {print $2}')
-                candidate_version=${candidate_version:-"(none)"}
-                installed_version=${installed_version:-"(none)"}
-                echo "依赖 $pkg 需要版本 $op $required_version。当前已安装: $installed_version，候选版本: $candidate_version。"
-                echo "当前系统的软件源无法满足此依赖，请选择较低版本的 cloud 内核或升级系统后重试。"
-        else
-                echo "自动安装依赖 $pkg 失败，请手动处理。"
+        if sudo apt-get install -y "$pkg"; then
+                if [ -n "$min_version" ]; then
+                        local installed_version
+                        installed_version=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)
+                        if [ -z "$installed_version" ] || ! dpkg --compare-versions "$installed_version" ge "$min_version"; then
+                                echo "$context 所需的依赖 $pkg 安装后版本 ($installed_version) 仍低于要求的 $min_version，请选择其它内核版本或升级系统。"
+                                exit 1
+                        fi
+                fi
+                return
         fi
 
+        echo "$context 所需的依赖 $pkg 安装失败，请手动处理或选择其它内核版本。"
         exit 1
 }
 
 ensure_linux_kbuild_package() {
         local pkg="$1"
         local min_version="$2"
-        local deb_arch="$3"
-        local revision_part="$4"
 
-        if [ -z "$pkg" ]; then
-                return
-        fi
-
-        if dpkg -s "$pkg" >/dev/null 2>&1; then
-                if [ -n "$min_version" ]; then
-                        local installed_version
-                        installed_version=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)
-                        if [ -n "$installed_version" ] && dpkg --compare-versions "$installed_version" ge "$min_version"; then
-                                return
-                        fi
-                else
-                        return
-                fi
-        fi
-
-        if sudo apt-get install -y "$pkg"; then
-                return
-        fi
-
-        local candidate_version
-        candidate_version="$min_version"
-        if [ -z "$candidate_version" ] && [ -n "$revision_part" ]; then
-                candidate_version="$revision_part"
-        fi
-
-        if [ -z "$candidate_version" ]; then
-                echo "无法确定 $pkg 的版本号，请手动安装该依赖。"
-                exit 1
-        fi
-
-        local filename="${pkg}_${candidate_version}_${deb_arch}.deb"
-        local base_url="https://deb.debian.org/debian/pool/main/l/linux/"
-
-        echo "正在下载依赖 $filename ..."
-        if ! download_deb_with_candidates "$filename" "$base_url"; then
-                echo "下载 $filename 失败，请检查网络或手动安装。"
-                exit 1
-        fi
-
-        if ! sudo dpkg -i "$filename"; then
-                rm -f "$filename"
-                echo "安装 $filename 失败，请检查系统依赖。"
-                exit 1
-        fi
-
-        rm -f "$filename"
+        ensure_generic_dependency "$pkg" "$min_version" "cloud headers"
 }
 
 ensure_gcc_for_host_package() {
         local pkg="$1"
         local min_version="$2"
-        local deb_arch="$3"
 
-        if [ -z "$pkg" ]; then
-                return
-        fi
-
-        if dpkg -s "$pkg" >/dev/null 2>&1; then
-                if [ -n "$min_version" ]; then
-                        local installed_version
-                        installed_version=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)
-                        if [ -n "$installed_version" ] && dpkg --compare-versions "$installed_version" ge "$min_version"; then
-                                return
-                        fi
-                else
-                        return
-                fi
-        fi
-
-        if sudo apt-get install -y "$pkg"; then
-                return
-        fi
-
-        if [ -z "$min_version" ]; then
-                echo "无法确定 $pkg 的版本号，请手动安装该依赖。"
-                exit 1
-        fi
-
-        local candidate_files=()
-        candidate_files+=("${pkg}_${min_version}_${deb_arch}.deb")
-        candidate_files+=("${pkg}_${min_version}_all.deb")
-        local base_url="https://deb.debian.org/debian/pool/main/g/gcc-15/"
-
-        local candidate
-        for candidate in "${candidate_files[@]}"; do
-                [ -z "$candidate" ] && continue
-                echo "正在下载依赖 $candidate ..."
-                if download_deb_with_candidates "$candidate" "$base_url"; then
-                        if sudo dpkg -i "$candidate"; then
-                                rm -f "$candidate"
-                                return
-                        fi
-                        rm -f "$candidate"
-                        echo "安装 $candidate 失败，请检查系统依赖。"
-                        exit 1
-                fi
-                rm -f "$candidate"
-        done
-
-        echo "下载 $pkg 失败，请检查网络或手动安装。"
-        exit 1
+        ensure_generic_dependency "$pkg" "$min_version" "cloud headers"
 }
 
 #启用BBR+fq
