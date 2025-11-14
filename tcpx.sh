@@ -1063,13 +1063,9 @@ ensure_cloud_predepends() {
         local dep
         while IFS=',' read -r dep; do
                 dep=$(echo "$dep" | xargs)
-                if [[ "$dep" == linux-base* && "$dep" == *"(>="* ]]; then
-                        local required_version="${dep#*>=}"
-                        required_version="${required_version%)*}"
-                        required_version=$(echo "$required_version" | xargs)
-                        if [ -n "$required_version" ]; then
-                                ensure_linux_base_version "$required_version"
-                        fi
+                if [[ "$dep" =~ ^linux-base[[:space:]]*\(>=[[:space:]]*([^)]*)\)$ ]]; then
+                        local required_version="${BASH_REMATCH[1]}"
+                        ensure_linux_base_version "$required_version"
                 fi
         done <<<"$pre_depends"
 }
