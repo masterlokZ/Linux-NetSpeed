@@ -270,7 +270,7 @@ kernel.pid_max=64000
 net.netfilter.nf_conntrack_max = 262144
 net.nf_conntrack_max = 262144
 ## Enable bbr
-net.core.default_qdisc = fq
+net.core.default_qdisc = cake
 net.ipv4.tcp_congestion_control = bbr
 net.ipv4.tcp_low_latency = 1
 EOF
@@ -412,18 +412,29 @@ checkurl() {
 #cn处理github加速
 check_cn() {
 	# 检查是否安装了jq命令，如果没有安装则进行安装
-	if ! command -v jq >/dev/null 2>&1; then
-		if command -v yum >/dev/null 2>&1; then
-			sudo yum install epel-release -y
-			sudo yum install -y jq
-		elif command -v apt-get >/dev/null 2>&1; then
-			sudo apt-get update
-			sudo apt-get install -y jq
-		else
-			echo "无法安装jq命令。请手动安装jq后再试。"
-			exit 1
-		fi
-	fi
+        if ! command -v jq >/dev/null 2>&1; then
+                if command -v yum >/dev/null 2>&1; then
+                        if ! yum install -y epel-release >/dev/null 2>&1; then
+                                echo "安装 epel-release 失败或已跳过，继续尝试安装 jq。" >&2
+                        fi
+                        if ! yum install -y jq >/dev/null 2>&1; then
+                                echo "无法安装 jq 命令，请手动安装后再试。" >&2
+                                exit 1
+                        fi
+                elif command -v apt-get >/dev/null 2>&1; then
+                        if ! apt-get update >/dev/null 2>&1; then
+                                echo "执行 apt-get update 失败，无法安装 jq。" >&2
+                                exit 1
+                        fi
+                        if ! apt-get install -y jq >/dev/null 2>&1; then
+                                echo "无法安装 jq 命令，请手动安装后再试。" >&2
+                                exit 1
+                        fi
+                else
+                        echo "无法安装jq命令。请手动安装jq后再试。" >&2
+                        exit 1
+                fi
+        fi
 
 	# 获取当前IP地址，设置超时为3秒
 	#current_ip=$(curl -s --max-time 3 https://ip.im -4)
@@ -560,10 +571,11 @@ installbbr() {
 			kernel_version=$github_ver
 			detele_kernel_head
 			headurl=$(curl -s 'https://api.github.com/repos/ylx2016/kernel/releases' | grep "${github_tag}" | grep 'deb' | grep 'headers' | awk -F '"' '{print $4}')
-			imgurl=$(curl -s 'https://api.github.com/repos/ylx2016/kernel/releases' | grep "${github_tag}" | grep 'deb' | grep -v 'headers' | grep -v 'devel' | awk -F '"' '{print $4}')
+                        imgurl=$(curl -s 'https://api.github.com/repos/ylx2016/kernel/releases' | grep "${github_tag}" | grep 'deb' | grep 'linux-image' | awk -F '"' '{print $4}')
 
-			headurl=$(check_cn "$headurl")
-			imgurl=$(check_cn "$imgurl")
+                        check_empty "$imgurl"
+                        headurl=$(check_cn "$headurl")
+                        imgurl=$(check_cn "$imgurl")
 
 			download_file "$headurl" linux-headers-d10.deb
 			download_file "$imgurl" linux-image-d10.deb
@@ -577,7 +589,7 @@ installbbr() {
 			kernel_version=$github_ver
 			detele_kernel_head
 			headurl=$(curl -s 'https://api.github.com/repos/ylx2016/kernel/releases' | grep "${github_tag}" | grep 'deb' | grep 'headers' | awk -F '"' '{print $4}')
-			imgurl=$(curl -s 'https://api.github.com/repos/ylx2016/kernel/releases' | grep "${github_tag}" | grep 'deb' | grep -v 'headers' | grep -v 'devel' | awk -F '"' '{print $4}')
+                        imgurl=$(curl -s 'https://api.github.com/repos/ylx2016/kernel/releases' | grep "${github_tag}" | grep 'deb' | grep 'linux-image' | awk -F '"' '{print $4}')
 
 			check_empty "$imgurl"
 			headurl=$(check_cn "$headurl")
@@ -1008,30 +1020,438 @@ installcloud() {
 	kernel_version=$SELECTED_VERSION
 
 	# 如果选择 'h'，使用 apt 安装 cloud 内核及 headers
-	if [ "$USE_APT" = true ]; then
-		echo "正在使用 apt 安装 linux-image-cloud-${ARCH} 及 headers..."
-		sudo apt update
-		if [ "$ARCH" == "x86_64" ]; then
-			sudo apt install -y "linux-image-cloud-amd64" "linux-headers-cloud-amd64"
-		elif [ "$ARCH" == "aarch64" ]; then
-			sudo apt install -y "linux-image-cloud-arm64" "linux-headers-cloud-arm64"
-		fi
-	else
-		# 下载并安装 image
-		echo "正在下载 $IMAGE_URL$IMAGE_DEB_FILE ..."
-		curl -O "$IMAGE_URL$IMAGE_DEB_FILE"
-		echo "正在安装 $IMAGE_DEB_FILE ..."
-		sudo dpkg -i "$IMAGE_DEB_FILE"
-		sudo apt-get install -f -y # 解决可能的依赖问题
-	fi
+        if [ "$USE_APT" = true ]; then
+                echo "正在使用 apt 安装 linux-image-cloud-${ARCH} 及 headers..."
+                sudo apt update
+                if [ "$ARCH" == "x86_64" ]; then
+                        sudo apt install -y "linux-image-cloud-amd64" "linux-headers-cloud-amd64"
+                elif [ "$ARCH" == "aarch64" ]; then
+                        sudo apt install -y "linux-image-cloud-arm64" "linux-headers-cloud-arm64"
+                fi
+        else
+                # 下载并安装 image
+                echo "正在下载 $IMAGE_URL$IMAGE_DEB_FILE ..."
+                if ! download_deb_with_candidates "$IMAGE_DEB_FILE" "$IMAGE_URL"; then
+                        echo "下载内核文件失败，请检查网络后重试。"
+                        rm -f "$VERSION_MAP_FILE"
+                        exit 1
+                fi
+                ensure_cloud_predepends "$IMAGE_DEB_FILE"
+                echo "正在安装 $IMAGE_DEB_FILE ..."
+                sudo dpkg -i "$IMAGE_DEB_FILE"
+                install_matching_cloud_headers "$SELECTED_VERSION" "$IMAGE_DEB_FILE" "$ARCH"
+                sudo apt-get install -f -y # 解决可能的依赖问题
+        fi
 
-	# 清理下载的文件
-	rm -f "$IMAGE_DEB_FILE" "$VERSION_MAP_FILE"
+        # 清理下载的文件
+        rm -f "$IMAGE_DEB_FILE" "$VERSION_MAP_FILE"
 
-	BBR_grub
-	echo -e "${Tip} 内核安装完毕，请参考上面的信息检查是否安装成功,默认从排第一的高版本内核启动"
-	check_kernel
+        BBR_grub
+        echo -e "${Tip} 内核安装完毕，请参考上面的信息检查是否安装成功,默认从排第一的高版本内核启动"
+        check_kernel
 
+}
+
+ensure_cloud_predepends() {
+        local deb_file="$1"
+        local pre_depends
+
+        pre_depends=$(dpkg-deb -f "$deb_file" Pre-Depends 2>/dev/null)
+        if [ -z "$pre_depends" ]; then
+                return
+        fi
+
+        local dep
+        while IFS=',' read -r dep; do
+                dep=$(echo "$dep" | xargs)
+                local first=""
+                local required_version=""
+                local expect_value=0
+                local token=""
+
+                for token in $dep; do
+                        if [ -z "$first" ]; then
+                                first="$token"
+                                case "$first" in
+                                linux-base*) ;;
+                                *)
+                                        break
+                                esac
+                                continue
+                        fi
+
+                        if [ "$expect_value" -eq 1 ]; then
+                                required_version="$token"
+                                break
+                        fi
+
+                        case "$token" in
+                        "(>=" )
+                                expect_value=1
+                                ;;
+                        "(>="*)
+                                required_version="${token#(>=}"
+                                break
+                                ;;
+                        esac
+                done
+
+                case "$first" in
+                linux-base*) ;;
+                *)
+                        continue
+                esac
+
+                required_version="${required_version%)}"
+                required_version=$(echo "$required_version" | xargs)
+                if [ -n "$required_version" ]; then
+                        ensure_linux_base_version "$required_version"
+                fi
+        done <<<"$pre_depends"
+}
+
+ensure_linux_base_version() {
+        local required="$1"
+        local installed=""
+
+        if dpkg-query -W -f='${Version}' linux-base >/dev/null 2>&1; then
+                installed=$(dpkg-query -W -f='${Version}' linux-base 2>/dev/null)
+        fi
+
+        if [ -n "$installed" ] && dpkg --compare-versions "$installed" ge "$required"; then
+                return
+        fi
+
+        local base_url="https://deb.debian.org/debian/pool/main/l/linux-base/"
+        local base_list
+        base_list=$(curl -fsSL "$base_url" | grep -oP 'linux-base_[^" ]+_all\.deb' | sort -u)
+
+        if [ -z "$base_list" ]; then
+                echo "无法获取 linux-base 包列表，请检查网络连接。"
+                exit 1
+        fi
+
+        local best_file=""
+        local best_version=""
+        local file
+        while IFS= read -r file; do
+                local version
+                version=$(echo "$file" | sed -n 's/linux-base_\(.*\)_all\.deb/\1/p')
+                if [ -z "$version" ]; then
+                        continue
+                fi
+                if dpkg --compare-versions "$version" ge "$required"; then
+                        if [ -z "$best_version" ] || dpkg --compare-versions "$version" lt "$best_version"; then
+                                best_version="$version"
+                                best_file="$file"
+                        fi
+                fi
+        done <<<"$base_list"
+
+        if [ -z "$best_file" ]; then
+                echo "没有找到满足依赖的 linux-base 版本(需要 >= $required)。"
+                exit 1
+        fi
+
+        echo "检测到需要 linux-base >= $required，正在安装 $best_version ..."
+        if ! curl -fSL -O "$base_url$best_file"; then
+                echo "下载 linux-base 失败，请检查网络连接。"
+                exit 1
+        fi
+        sudo dpkg -i "$best_file"
+        sudo apt-get install -f -y
+        rm -f "$best_file"
+}
+
+download_deb_with_candidates() {
+        local file="$1"
+        shift
+
+        if [ -z "$file" ] || [ "$#" -eq 0 ]; then
+                return 1
+        fi
+
+        rm -f "$file"
+        local base=""
+        for base in "$@"; do
+                if curl -fSL -o "$file" "$base$file"; then
+                        return 0
+                fi
+        done
+
+        rm -f "$file"
+        return 1
+}
+
+install_matching_cloud_headers() {
+        local version="$1"
+        local image_file="$2"
+        local machine_arch="$3"
+
+        if [ -z "$version" ] || [ -z "$image_file" ] || [ -z "$machine_arch" ]; then
+                echo "未能确定 cloud headers 所需的版本或架构信息。"
+                exit 1
+        fi
+
+        local deb_arch=""
+        local header_suffix=""
+        local header_bases=()
+
+        case "$machine_arch" in
+        x86_64)
+                deb_arch="amd64"
+                header_suffix="cloud-amd64"
+                header_bases=(
+                        "https://deb.debian.org/debian/pool/main/l/linux-signed-amd64/"
+                        "https://deb.debian.org/debian/pool/main/l/linux/"
+                )
+                ;;
+        aarch64)
+                deb_arch="arm64"
+                header_suffix="cloud-arm64"
+                header_bases=(
+                        "https://deb.debian.org/debian/pool/main/l/linux-signed-arm64/"
+                        "https://deb.debian.org/debian/pool/main/l/linux/"
+                )
+                ;;
+        *)
+                echo "不支持的架构：$machine_arch"
+                exit 1
+                ;;
+        esac
+
+        local revision_part="${image_file#*_}"
+        revision_part="${revision_part%_${deb_arch}.deb}"
+
+        if [ -z "$revision_part" ] || [ "$revision_part" = "$image_file" ]; then
+                echo "无法解析 cloud 内核的修订版本，匹配 headers 失败。"
+                exit 1
+        fi
+
+        local header_common="linux-headers-${version}-common_${revision_part}_all.deb"
+        local header_arch="linux-headers-${version}-${header_suffix}_${revision_part}_${deb_arch}.deb"
+
+        echo "正在下载匹配的 cloud headers: $header_common ..."
+        if ! download_deb_with_candidates "$header_common" "${header_bases[@]}"; then
+                echo "下载 $header_common 失败，请稍后重试或检查网络。"
+                exit 1
+        fi
+
+        echo "正在下载匹配的 cloud headers: $header_arch ..."
+        if ! download_deb_with_candidates "$header_arch" "${header_bases[@]}"; then
+                echo "下载 $header_arch 失败，请稍后重试或检查网络。"
+                rm -f "$header_common"
+                exit 1
+        fi
+
+        ensure_cloud_header_dependencies "$header_arch" "$deb_arch" "$revision_part"
+
+        echo "正在安装 $header_common ..."
+        if ! sudo dpkg -i "$header_common"; then
+                rm -f "$header_common" "$header_arch"
+                echo "安装 $header_common 失败，请检查系统依赖。"
+                exit 1
+        fi
+
+        echo "正在安装 $header_arch ..."
+        if ! sudo dpkg -i "$header_arch"; then
+                sudo apt-get install -f -y >/dev/null 2>&1 || true
+                if ! sudo dpkg -i "$header_arch"; then
+                        rm -f "$header_common" "$header_arch"
+                        echo "安装 $header_arch 失败，请检查系统依赖。"
+                        exit 1
+                fi
+        fi
+
+        rm -f "$header_common" "$header_arch"
+}
+
+ensure_cloud_header_dependencies() {
+        local header_arch_file="$1"
+        local deb_arch="$2"
+        local revision_part="$3"
+
+        if [ -z "$header_arch_file" ] || [ -z "$deb_arch" ]; then
+                return
+        fi
+
+        local depends_field
+        depends_field=$(dpkg-deb -f "$header_arch_file" Depends 2>/dev/null)
+        if [ -z "$depends_field" ]; then
+                return
+        fi
+
+        echo "检查 cloud headers 依赖..."
+
+        while IFS= read -r raw_dep; do
+                local dep trimmed alt pkg clause op ver
+                dep=$(printf '%s' "$raw_dep")
+                trimmed=$(printf '%s' "$dep" | xargs)
+                [ -z "$trimmed" ] && continue
+
+                alt=${trimmed%%|*}
+                alt=$(printf '%s' "$alt" | xargs)
+                pkg=${alt%% (*}
+                pkg=$(printf '%s' "$pkg" | xargs)
+                [ -z "$pkg" ] && continue
+
+                clause=$(printf '%s' "$alt" | sed -n 's/.*(\(.*\)).*/\1/p')
+                clause=$(printf '%s' "$clause" | xargs)
+                op=""
+                ver=""
+                if [ -n "$clause" ]; then
+                        op=$clause
+                        ver=""
+                        case "$clause" in
+                        *" "*)
+                                op=${clause%% *}
+                                ver=${clause#* }
+                                ;;
+                        esac
+                        ver=$(printf '%s' "$ver" | xargs)
+                fi
+
+                case "$pkg" in
+                linux-kbuild-*)
+                        ensure_linux_kbuild_package "$pkg" "$ver" "$deb_arch" "$revision_part"
+                        ;;
+                gcc-[0-9][0-9]-for-host)
+                        ensure_gcc_for_host_package "$pkg" "$ver" "$deb_arch"
+                        ;;
+                *)
+                        ensure_generic_dependency "$pkg"
+                        ;;
+                esac
+        done < <(printf '%s' "$depends_field" | tr ',' '\n')
+}
+
+ensure_generic_dependency() {
+        local pkg="$1"
+
+        if [ -z "$pkg" ]; then
+                return
+        fi
+
+        if dpkg -s "$pkg" >/dev/null 2>&1; then
+                return
+        fi
+
+        if sudo apt-get install -y "$pkg"; then
+                return
+        fi
+
+        echo "自动安装依赖 $pkg 失败，请手动处理。"
+        exit 1
+}
+
+ensure_linux_kbuild_package() {
+        local pkg="$1"
+        local min_version="$2"
+        local deb_arch="$3"
+        local revision_part="$4"
+
+        if [ -z "$pkg" ]; then
+                return
+        fi
+
+        if dpkg -s "$pkg" >/dev/null 2>&1; then
+                if [ -n "$min_version" ]; then
+                        local installed_version
+                        installed_version=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)
+                        if [ -n "$installed_version" ] && dpkg --compare-versions "$installed_version" ge "$min_version"; then
+                                return
+                        fi
+                else
+                        return
+                fi
+        fi
+
+        if sudo apt-get install -y "$pkg"; then
+                return
+        fi
+
+        local candidate_version
+        candidate_version="$min_version"
+        if [ -z "$candidate_version" ] && [ -n "$revision_part" ]; then
+                candidate_version="$revision_part"
+        fi
+
+        if [ -z "$candidate_version" ]; then
+                echo "无法确定 $pkg 的版本号，请手动安装该依赖。"
+                exit 1
+        fi
+
+        local filename="${pkg}_${candidate_version}_${deb_arch}.deb"
+        local base_url="https://deb.debian.org/debian/pool/main/l/linux/"
+
+        echo "正在下载依赖 $filename ..."
+        if ! download_deb_with_candidates "$filename" "$base_url"; then
+                echo "下载 $filename 失败，请检查网络或手动安装。"
+                exit 1
+        fi
+
+        if ! sudo dpkg -i "$filename"; then
+                rm -f "$filename"
+                echo "安装 $filename 失败，请检查系统依赖。"
+                exit 1
+        fi
+
+        rm -f "$filename"
+}
+
+ensure_gcc_for_host_package() {
+        local pkg="$1"
+        local min_version="$2"
+        local deb_arch="$3"
+
+        if [ -z "$pkg" ]; then
+                return
+        fi
+
+        if dpkg -s "$pkg" >/dev/null 2>&1; then
+                if [ -n "$min_version" ]; then
+                        local installed_version
+                        installed_version=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)
+                        if [ -n "$installed_version" ] && dpkg --compare-versions "$installed_version" ge "$min_version"; then
+                                return
+                        fi
+                else
+                        return
+                fi
+        fi
+
+        if sudo apt-get install -y "$pkg"; then
+                return
+        fi
+
+        if [ -z "$min_version" ]; then
+                echo "无法确定 $pkg 的版本号，请手动安装该依赖。"
+                exit 1
+        fi
+
+        local candidate_files=()
+        candidate_files+=("${pkg}_${min_version}_${deb_arch}.deb")
+        candidate_files+=("${pkg}_${min_version}_all.deb")
+        local base_url="https://deb.debian.org/debian/pool/main/g/gcc-15/"
+
+        local candidate
+        for candidate in "${candidate_files[@]}"; do
+                [ -z "$candidate" ] && continue
+                echo "正在下载依赖 $candidate ..."
+                if download_deb_with_candidates "$candidate" "$base_url"; then
+                        if sudo dpkg -i "$candidate"; then
+                                rm -f "$candidate"
+                                return
+                        fi
+                        rm -f "$candidate"
+                        echo "安装 $candidate 失败，请检查系统依赖。"
+                        exit 1
+                fi
+                rm -f "$candidate"
+        done
+
+        echo "下载 $pkg 失败，请检查网络或手动安装。"
+        exit 1
 }
 
 #启用BBR+fq
