@@ -1283,7 +1283,7 @@ ensure_cloud_header_dependencies() {
 
         echo "检查 cloud headers 依赖..."
 
-        while IFS=',' read -r raw_dep; do
+        while IFS= read -r raw_dep; do
                 local dep trimmed alt pkg clause op ver
                 dep=$(printf '%s' "$raw_dep")
                 trimmed=$(printf '%s' "$dep" | xargs)
@@ -1322,9 +1322,7 @@ ensure_cloud_header_dependencies() {
                         ensure_generic_dependency "$pkg"
                         ;;
                 esac
-        done <<EOF
-$depends_field
-EOF
+        done < <(printf '%s' "$depends_field" | tr ',' '\n')
 }
 
 ensure_generic_dependency() {
@@ -1427,26 +1425,33 @@ ensure_gcc_for_host_package() {
         fi
 
         if [ -z "$min_version" ]; then
-                        echo "无法确定 $pkg 的版本号，请手动安装该依赖。"
-                        exit 1
+                echo "无法确定 $pkg 的版本号，请手动安装该依赖。"
+                exit 1
         fi
 
-        local filename="${pkg}_${min_version}_${deb_arch}.deb"
+        local candidate_files=()
+        candidate_files+=("${pkg}_${min_version}_${deb_arch}.deb")
+        candidate_files+=("${pkg}_${min_version}_all.deb")
         local base_url="https://deb.debian.org/debian/pool/main/g/gcc-15/"
 
-        echo "正在下载依赖 $filename ..."
-        if ! download_deb_with_candidates "$filename" "$base_url"; then
-                echo "下载 $filename 失败，请检查网络或手动安装。"
-                exit 1
-        fi
+        local candidate
+        for candidate in "${candidate_files[@]}"; do
+                [ -z "$candidate" ] && continue
+                echo "正在下载依赖 $candidate ..."
+                if download_deb_with_candidates "$candidate" "$base_url"; then
+                        if sudo dpkg -i "$candidate"; then
+                                rm -f "$candidate"
+                                return
+                        fi
+                        rm -f "$candidate"
+                        echo "安装 $candidate 失败，请检查系统依赖。"
+                        exit 1
+                fi
+                rm -f "$candidate"
+        done
 
-        if ! sudo dpkg -i "$filename"; then
-                rm -f "$filename"
-                echo "安装 $filename 失败，请检查系统依赖。"
-                exit 1
-        fi
-
-        rm -f "$filename"
+        echo "下载 $pkg 失败，请检查网络或手动安装。"
+        exit 1
 }
 
 #启用BBR+fq
