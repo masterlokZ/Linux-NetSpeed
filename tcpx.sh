@@ -1031,7 +1031,7 @@ installcloud() {
         else
                 # 下载并安装 image
                 echo "正在下载 $IMAGE_URL$IMAGE_DEB_FILE ..."
-                if ! curl -fSL -O "$IMAGE_URL$IMAGE_DEB_FILE"; then
+                if ! download_deb_with_candidates "$IMAGE_DEB_FILE" "$IMAGE_URL"; then
                         echo "下载内核文件失败，请检查网络后重试。"
                         rm -f "$VERSION_MAP_FILE"
                         exit 1
@@ -1039,6 +1039,7 @@ installcloud() {
                 ensure_cloud_predepends "$IMAGE_DEB_FILE"
                 echo "正在安装 $IMAGE_DEB_FILE ..."
                 sudo dpkg -i "$IMAGE_DEB_FILE"
+                install_matching_cloud_headers "$SELECTED_VERSION" "$IMAGE_DEB_FILE" "$ARCH"
                 sudo apt-get install -f -y # 解决可能的依赖问题
         fi
 
@@ -1160,6 +1161,104 @@ ensure_linux_base_version() {
         sudo dpkg -i "$best_file"
         sudo apt-get install -f -y
         rm -f "$best_file"
+}
+
+download_deb_with_candidates() {
+        local file="$1"
+        shift
+
+        if [ -z "$file" ] || [ "$#" -eq 0 ]; then
+                return 1
+        fi
+
+        rm -f "$file"
+        local base=""
+        for base in "$@"; do
+                if curl -fSL -o "$file" "$base$file"; then
+                        return 0
+                fi
+        done
+
+        rm -f "$file"
+        return 1
+}
+
+install_matching_cloud_headers() {
+        local version="$1"
+        local image_file="$2"
+        local machine_arch="$3"
+
+        if [ -z "$version" ] || [ -z "$image_file" ] || [ -z "$machine_arch" ]; then
+                echo "未能确定 cloud headers 所需的版本或架构信息。"
+                exit 1
+        fi
+
+        local deb_arch=""
+        local header_suffix=""
+        local header_bases=()
+
+        case "$machine_arch" in
+        x86_64)
+                deb_arch="amd64"
+                header_suffix="cloud-amd64"
+                header_bases=(
+                        "https://deb.debian.org/debian/pool/main/l/linux-signed-amd64/"
+                        "https://deb.debian.org/debian/pool/main/l/linux/"
+                )
+                ;;
+        aarch64)
+                deb_arch="arm64"
+                header_suffix="cloud-arm64"
+                header_bases=(
+                        "https://deb.debian.org/debian/pool/main/l/linux-signed-arm64/"
+                        "https://deb.debian.org/debian/pool/main/l/linux/"
+                )
+                ;;
+        *)
+                echo "不支持的架构：$machine_arch"
+                exit 1
+                ;;
+        esac
+
+        local revision_part="${image_file#*_}"
+        revision_part="${revision_part%_${deb_arch}.deb}"
+
+        if [ -z "$revision_part" ] || [ "$revision_part" = "$image_file" ]; then
+                echo "无法解析 cloud 内核的修订版本，匹配 headers 失败。"
+                exit 1
+        fi
+
+        local header_common="linux-headers-${version}-common_${revision_part}_all.deb"
+        local header_arch="linux-headers-${version}-${header_suffix}_${revision_part}_${deb_arch}.deb"
+
+        echo "正在下载匹配的 cloud headers: $header_common ..."
+        if ! download_deb_with_candidates "$header_common" "${header_bases[@]}"; then
+                echo "下载 $header_common 失败，请稍后重试或检查网络。"
+                exit 1
+        fi
+
+        echo "正在下载匹配的 cloud headers: $header_arch ..."
+        if ! download_deb_with_candidates "$header_arch" "${header_bases[@]}"; then
+                echo "下载 $header_arch 失败，请稍后重试或检查网络。"
+                rm -f "$header_common"
+                exit 1
+        fi
+
+        echo "正在安装 $header_common ..."
+        if ! sudo dpkg -i "$header_common"; then
+                rm -f "$header_common" "$header_arch"
+                echo "安装 $header_common 失败，请检查系统依赖。"
+                exit 1
+        fi
+
+        echo "正在安装 $header_arch ..."
+        if ! sudo dpkg -i "$header_arch"; then
+                rm -f "$header_common" "$header_arch"
+                echo "安装 $header_arch 失败，请检查系统依赖。"
+                exit 1
+        fi
+
+        rm -f "$header_common" "$header_arch"
 }
 
 #启用BBR+fq
