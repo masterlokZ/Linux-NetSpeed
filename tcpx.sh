@@ -968,13 +968,16 @@ installcloud() {
 	# 清空临时映射文件
 	>"$VERSION_MAP_FILE"
 
-	# 提取 image 版本号并写入映射文件
-	while IFS= read -r file; do
-		if [[ "$file" =~ linux-image-([0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9]+)?) ]]; then
-			local ver="${BASH_REMATCH[1]}"
-			echo "$ver:$file" >>"$VERSION_MAP_FILE"
-		fi
-	done <<<"$DEB_FILES_RAW"
+        # 提取 image 版本号并写入映射文件，过滤掉带有 rc/exp 标签的实验性版本
+        while IFS= read -r file; do
+                if [[ "$file" == *"~rc"* || "$file" == *"~exp"* ]]; then
+                        continue
+                fi
+                if [[ "$file" =~ linux-image-([0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9]+)?) ]]; then
+                        local ver="${BASH_REMATCH[1]}"
+                        echo "$ver:$file" >>"$VERSION_MAP_FILE"
+                fi
+        done <<<"$DEB_FILES_RAW"
 
 	# 读取排序并去重后的版本号
 	mapfile -t VERSIONS < <(cut -d':' -f1 "$VERSION_MAP_FILE" | sort -V -u)
