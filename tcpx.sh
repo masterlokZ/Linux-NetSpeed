@@ -1244,6 +1244,8 @@ install_matching_cloud_headers() {
                 exit 1
         fi
 
+        ensure_cloud_header_dependencies "$header_arch" "$deb_arch" "$revision_part"
+
         echo "正在安装 $header_common ..."
         if ! sudo dpkg -i "$header_common"; then
                 rm -f "$header_common" "$header_arch"
@@ -1253,12 +1255,198 @@ install_matching_cloud_headers() {
 
         echo "正在安装 $header_arch ..."
         if ! sudo dpkg -i "$header_arch"; then
-                rm -f "$header_common" "$header_arch"
-                echo "安装 $header_arch 失败，请检查系统依赖。"
-                exit 1
+                sudo apt-get install -f -y >/dev/null 2>&1 || true
+                if ! sudo dpkg -i "$header_arch"; then
+                        rm -f "$header_common" "$header_arch"
+                        echo "安装 $header_arch 失败，请检查系统依赖。"
+                        exit 1
+                fi
         fi
 
         rm -f "$header_common" "$header_arch"
+}
+
+ensure_cloud_header_dependencies() {
+        local header_arch_file="$1"
+        local deb_arch="$2"
+        local revision_part="$3"
+
+        if [ -z "$header_arch_file" ] || [ -z "$deb_arch" ]; then
+                return
+        fi
+
+        local depends_field
+        depends_field=$(dpkg-deb -f "$header_arch_file" Depends 2>/dev/null)
+        if [ -z "$depends_field" ]; then
+                return
+        fi
+
+        echo "检查 cloud headers 依赖..."
+
+        while IFS=',' read -r raw_dep; do
+                local dep trimmed alt pkg clause op ver
+                dep=$(printf '%s' "$raw_dep")
+                trimmed=$(printf '%s' "$dep" | xargs)
+                [ -z "$trimmed" ] && continue
+
+                alt=${trimmed%%|*}
+                alt=$(printf '%s' "$alt" | xargs)
+                pkg=${alt%% (*}
+                pkg=$(printf '%s' "$pkg" | xargs)
+                [ -z "$pkg" ] && continue
+
+                clause=$(printf '%s' "$alt" | sed -n 's/.*(\(.*\)).*/\1/p')
+                clause=$(printf '%s' "$clause" | xargs)
+                op=""
+                ver=""
+                if [ -n "$clause" ]; then
+                        op=$clause
+                        ver=""
+                        case "$clause" in
+                        *" "*)
+                                op=${clause%% *}
+                                ver=${clause#* }
+                                ;;
+                        esac
+                        ver=$(printf '%s' "$ver" | xargs)
+                fi
+
+                case "$pkg" in
+                linux-kbuild-*)
+                        ensure_linux_kbuild_package "$pkg" "$ver" "$deb_arch" "$revision_part"
+                        ;;
+                gcc-[0-9][0-9]-for-host)
+                        ensure_gcc_for_host_package "$pkg" "$ver" "$deb_arch"
+                        ;;
+                *)
+                        ensure_generic_dependency "$pkg"
+                        ;;
+                esac
+        done <<EOF
+$depends_field
+EOF
+}
+
+ensure_generic_dependency() {
+        local pkg="$1"
+
+        if [ -z "$pkg" ]; then
+                return
+        fi
+
+        if dpkg -s "$pkg" >/dev/null 2>&1; then
+                return
+        fi
+
+        if sudo apt-get install -y "$pkg"; then
+                return
+        fi
+
+        echo "自动安装依赖 $pkg 失败，请手动处理。"
+        exit 1
+}
+
+ensure_linux_kbuild_package() {
+        local pkg="$1"
+        local min_version="$2"
+        local deb_arch="$3"
+        local revision_part="$4"
+
+        if [ -z "$pkg" ]; then
+                return
+        fi
+
+        if dpkg -s "$pkg" >/dev/null 2>&1; then
+                if [ -n "$min_version" ]; then
+                        local installed_version
+                        installed_version=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)
+                        if [ -n "$installed_version" ] && dpkg --compare-versions "$installed_version" ge "$min_version"; then
+                                return
+                        fi
+                else
+                        return
+                fi
+        fi
+
+        if sudo apt-get install -y "$pkg"; then
+                return
+        fi
+
+        local candidate_version
+        candidate_version="$min_version"
+        if [ -z "$candidate_version" ] && [ -n "$revision_part" ]; then
+                candidate_version="$revision_part"
+        fi
+
+        if [ -z "$candidate_version" ]; then
+                echo "无法确定 $pkg 的版本号，请手动安装该依赖。"
+                exit 1
+        fi
+
+        local filename="${pkg}_${candidate_version}_${deb_arch}.deb"
+        local base_url="https://deb.debian.org/debian/pool/main/l/linux/"
+
+        echo "正在下载依赖 $filename ..."
+        if ! download_deb_with_candidates "$filename" "$base_url"; then
+                echo "下载 $filename 失败，请检查网络或手动安装。"
+                exit 1
+        fi
+
+        if ! sudo dpkg -i "$filename"; then
+                rm -f "$filename"
+                echo "安装 $filename 失败，请检查系统依赖。"
+                exit 1
+        fi
+
+        rm -f "$filename"
+}
+
+ensure_gcc_for_host_package() {
+        local pkg="$1"
+        local min_version="$2"
+        local deb_arch="$3"
+
+        if [ -z "$pkg" ]; then
+                return
+        fi
+
+        if dpkg -s "$pkg" >/dev/null 2>&1; then
+                if [ -n "$min_version" ]; then
+                        local installed_version
+                        installed_version=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)
+                        if [ -n "$installed_version" ] && dpkg --compare-versions "$installed_version" ge "$min_version"; then
+                                return
+                        fi
+                else
+                        return
+                fi
+        fi
+
+        if sudo apt-get install -y "$pkg"; then
+                return
+        fi
+
+        if [ -z "$min_version" ]; then
+                        echo "无法确定 $pkg 的版本号，请手动安装该依赖。"
+                        exit 1
+        fi
+
+        local filename="${pkg}_${min_version}_${deb_arch}.deb"
+        local base_url="https://deb.debian.org/debian/pool/main/g/gcc-15/"
+
+        echo "正在下载依赖 $filename ..."
+        if ! download_deb_with_candidates "$filename" "$base_url"; then
+                echo "下载 $filename 失败，请检查网络或手动安装。"
+                exit 1
+        fi
+
+        if ! sudo dpkg -i "$filename"; then
+                rm -f "$filename"
+                echo "安装 $filename 失败，请检查系统依赖。"
+                exit 1
+        fi
+
+        rm -f "$filename"
 }
 
 #启用BBR+fq
