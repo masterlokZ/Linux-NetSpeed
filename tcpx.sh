@@ -270,7 +270,7 @@ kernel.pid_max=64000
 net.netfilter.nf_conntrack_max = 262144
 net.nf_conntrack_max = 262144
 ## Enable bbr
-net.core.default_qdisc = fq
+net.core.default_qdisc = cake
 net.ipv4.tcp_congestion_control = bbr
 net.ipv4.tcp_low_latency = 1
 EOF
@@ -968,16 +968,13 @@ installcloud() {
 	# 清空临时映射文件
 	>"$VERSION_MAP_FILE"
 
-        # 提取 image 版本号并写入映射文件，过滤掉带有 rc/exp 标签的实验性版本
-        while IFS= read -r file; do
-                if [[ "$file" == *"~rc"* || "$file" == *"~exp"* ]]; then
-                        continue
-                fi
-                if [[ "$file" =~ linux-image-([0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9]+)?) ]]; then
-                        local ver="${BASH_REMATCH[1]}"
-                        echo "$ver:$file" >>"$VERSION_MAP_FILE"
-                fi
-        done <<<"$DEB_FILES_RAW"
+	# 提取 image 版本号并写入映射文件
+	while IFS= read -r file; do
+		if [[ "$file" =~ linux-image-([0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9]+)?) ]]; then
+			local ver="${BASH_REMATCH[1]}"
+			echo "$ver:$file" >>"$VERSION_MAP_FILE"
+		fi
+	done <<<"$DEB_FILES_RAW"
 
 	# 读取排序并去重后的版本号
 	mapfile -t VERSIONS < <(cut -d':' -f1 "$VERSION_MAP_FILE" | sort -V -u)
@@ -1032,10 +1029,9 @@ installcloud() {
                         sudo apt install -y "linux-image-cloud-arm64" "linux-headers-cloud-arm64"
                 fi
         else
-                sudo apt-get update >/dev/null 2>&1 || sudo apt-get --allow-releaseinfo-change update >/dev/null 2>&1
                 # 下载并安装 image
                 echo "正在下载 $IMAGE_URL$IMAGE_DEB_FILE ..."
-                if ! download_deb_with_candidates "$IMAGE_DEB_FILE" "$IMAGE_URL"; then
+                if ! curl -fSL -O "$IMAGE_URL$IMAGE_DEB_FILE"; then
                         echo "下载内核文件失败，请检查网络后重试。"
                         rm -f "$VERSION_MAP_FILE"
                         exit 1
@@ -1043,7 +1039,6 @@ installcloud() {
                 ensure_cloud_predepends "$IMAGE_DEB_FILE"
                 echo "正在安装 $IMAGE_DEB_FILE ..."
                 sudo dpkg -i "$IMAGE_DEB_FILE"
-                install_matching_cloud_headers "$SELECTED_VERSION" "$IMAGE_DEB_FILE" "$ARCH"
                 sudo apt-get install -f -y # 解决可能的依赖问题
         fi
 
@@ -1068,8 +1063,47 @@ ensure_cloud_predepends() {
         local dep
         while IFS=',' read -r dep; do
                 dep=$(echo "$dep" | xargs)
-                if [[ "$dep" =~ ^linux-base[[:space:]]*\(>=[[:space:]]*([^)]*)\)$ ]]; then
-                        local required_version="${BASH_REMATCH[1]}"
+                local first=""
+                local required_version=""
+                local expect_value=0
+                local token=""
+
+                for token in $dep; do
+                        if [ -z "$first" ]; then
+                                first="$token"
+                                case "$first" in
+                                linux-base*) ;;
+                                *)
+                                        break
+                                esac
+                                continue
+                        fi
+
+                        if [ "$expect_value" -eq 1 ]; then
+                                required_version="$token"
+                                break
+                        fi
+
+                        case "$token" in
+                        "(>=" )
+                                expect_value=1
+                                ;;
+                        "(>="*)
+                                required_version="${token#(>=}"
+                                break
+                                ;;
+                        esac
+                done
+
+                case "$first" in
+                linux-base*) ;;
+                *)
+                        continue
+                esac
+
+                required_version="${required_version%)}"
+                required_version=$(echo "$required_version" | xargs)
+                if [ -n "$required_version" ]; then
                         ensure_linux_base_version "$required_version"
                 fi
         done <<<"$pre_depends"
@@ -1126,239 +1160,6 @@ ensure_linux_base_version() {
         sudo dpkg -i "$best_file"
         sudo apt-get install -f -y
         rm -f "$best_file"
-}
-
-download_deb_with_candidates() {
-        local file="$1"
-        shift
-
-        if [ -z "$file" ] || [ "$#" -eq 0 ]; then
-                return 1
-        fi
-
-        rm -f "$file"
-        local base=""
-        for base in "$@"; do
-                if curl -fSL -o "$file" "$base$file"; then
-                        return 0
-                fi
-        done
-
-        rm -f "$file"
-        return 1
-}
-
-install_matching_cloud_headers() {
-        local version="$1"
-        local image_file="$2"
-        local machine_arch="$3"
-
-        if [ -z "$version" ] || [ -z "$image_file" ] || [ -z "$machine_arch" ]; then
-                echo "未能确定 cloud headers 所需的版本或架构信息。"
-                exit 1
-        fi
-
-        local deb_arch=""
-        local header_suffix=""
-        local header_bases=()
-
-        case "$machine_arch" in
-        x86_64)
-                deb_arch="amd64"
-                header_suffix="cloud-amd64"
-                header_bases=(
-                        "https://deb.debian.org/debian/pool/main/l/linux-signed-amd64/"
-                        "https://deb.debian.org/debian/pool/main/l/linux/"
-                )
-                ;;
-        aarch64)
-                deb_arch="arm64"
-                header_suffix="cloud-arm64"
-                header_bases=(
-                        "https://deb.debian.org/debian/pool/main/l/linux-signed-arm64/"
-                        "https://deb.debian.org/debian/pool/main/l/linux/"
-                )
-                ;;
-        *)
-                echo "不支持的架构：$machine_arch"
-                exit 1
-                ;;
-        esac
-
-        local revision_part="${image_file#*_}"
-        revision_part="${revision_part%_${deb_arch}.deb}"
-
-        if [ -z "$revision_part" ] || [ "$revision_part" = "$image_file" ]; then
-                echo "无法解析 cloud 内核的修订版本，匹配 headers 失败。"
-                exit 1
-        fi
-
-        local header_common="linux-headers-${version}-common_${revision_part}_all.deb"
-        local header_arch="linux-headers-${version}-${header_suffix}_${revision_part}_${deb_arch}.deb"
-
-        echo "正在下载匹配的 cloud headers: $header_common ..."
-        if ! download_deb_with_candidates "$header_common" "${header_bases[@]}"; then
-                echo "下载 $header_common 失败，请稍后重试或检查网络。"
-                exit 1
-        fi
-
-        echo "正在下载匹配的 cloud headers: $header_arch ..."
-        if ! download_deb_with_candidates "$header_arch" "${header_bases[@]}"; then
-                echo "下载 $header_arch 失败，请稍后重试或检查网络。"
-                rm -f "$header_common"
-                exit 1
-        fi
-
-        ensure_cloud_header_dependencies "$header_arch" "$deb_arch" "$revision_part"
-
-        echo "正在安装 $header_common ..."
-        if ! sudo dpkg -i "$header_common"; then
-                rm -f "$header_common" "$header_arch"
-                echo "安装 $header_common 失败，请检查系统依赖。"
-                exit 1
-        fi
-
-        echo "正在安装 $header_arch ..."
-        if ! sudo dpkg -i "$header_arch"; then
-                sudo apt-get install -f -y >/dev/null 2>&1 || true
-                if ! sudo dpkg -i "$header_arch"; then
-                        rm -f "$header_common" "$header_arch"
-                        echo "安装 $header_arch 失败，请检查系统依赖。"
-                        exit 1
-                fi
-        fi
-
-        rm -f "$header_common" "$header_arch"
-}
-
-ensure_cloud_header_dependencies() {
-        local header_arch_file="$1"
-        local deb_arch="$2"
-        local revision_part="$3"
-
-        if [ -z "$header_arch_file" ] || [ -z "$deb_arch" ]; then
-                return
-        fi
-
-        local depends_field
-        depends_field=$(dpkg-deb -f "$header_arch_file" Depends 2>/dev/null)
-        if [ -z "$depends_field" ]; then
-                return
-        fi
-
-        echo "检查 cloud headers 依赖..."
-
-        while IFS= read -r raw_dep; do
-                local dep trimmed alt pkg clause op ver
-                dep=$(printf '%s' "$raw_dep")
-                trimmed=$(printf '%s' "$dep" | xargs)
-                [ -z "$trimmed" ] && continue
-
-                alt=${trimmed%%|*}
-                alt=$(printf '%s' "$alt" | xargs)
-                pkg=${alt%% (*}
-                pkg=$(printf '%s' "$pkg" | xargs)
-                [ -z "$pkg" ] && continue
-
-                clause=$(printf '%s' "$alt" | sed -n 's/.*(\(.*\)).*/\1/p')
-                clause=$(printf '%s' "$clause" | xargs)
-                op=""
-                ver=""
-                if [ -n "$clause" ]; then
-                        op=$clause
-                        ver=""
-                        case "$clause" in
-                        *" "*)
-                                op=${clause%% *}
-                                ver=${clause#* }
-                                ;;
-                        esac
-                        ver=$(printf '%s' "$ver" | xargs)
-                fi
-
-                case "$pkg" in
-                linux-kbuild-*)
-                        ensure_linux_kbuild_package "$pkg" "$ver"
-                        ;;
-                gcc-[0-9][0-9]-for-host)
-                        ensure_gcc_for_host_package "$pkg" "$ver"
-                        ;;
-                *)
-                        ensure_generic_dependency "$pkg" "$ver"
-                        ;;
-                esac
-        done < <(printf '%s' "$depends_field" | tr ',' '\n')
-}
-
-apt_cache_candidate_version() {
-        local pkg="$1"
-        apt-cache policy "$pkg" 2>/dev/null | awk -F': ' '/Candidate:/ {print $2; exit}'
-}
-
-ensure_generic_dependency() {
-        local pkg="$1"
-        local min_version="$2"
-        local context="${3:-cloud headers}"
-
-        if [ -z "$pkg" ]; then
-                return
-        fi
-
-        if dpkg -s "$pkg" >/dev/null 2>&1; then
-                if [ -n "$min_version" ]; then
-                        local installed_version
-                        installed_version=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)
-                        if [ -n "$installed_version" ] && dpkg --compare-versions "$installed_version" ge "$min_version"; then
-                                return
-                        fi
-                else
-                        return
-                fi
-        fi
-
-        local candidate=""
-        candidate=$(apt_cache_candidate_version "$pkg")
-        if [ -z "$candidate" ] || [ "$candidate" = "(none)" ]; then
-                if [ -n "$min_version" ]; then
-                        echo "$context 所需的依赖 $pkg (>= $min_version) 在当前软件源中不可用，请选择较低版本的 cloud 内核或启用适当的软件源。"
-                else
-                        echo "$context 所需的依赖 $pkg 在当前软件源中不可用，请选择较低版本的 cloud 内核或启用适当的软件源。"
-                fi
-                exit 1
-        fi
-        if [ -n "$min_version" ] && ! dpkg --compare-versions "$candidate" ge "$min_version"; then
-                echo "$context 所需的依赖 $pkg 需要至少版本 $min_version，但当前软件源仅提供 $candidate。请选择较低版本的 cloud 内核或升级系统。"
-                exit 1
-        fi
-
-        if sudo apt-get install -y "$pkg"; then
-                if [ -n "$min_version" ]; then
-                        local installed_version
-                        installed_version=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null)
-                        if [ -z "$installed_version" ] || ! dpkg --compare-versions "$installed_version" ge "$min_version"; then
-                                echo "$context 所需的依赖 $pkg 安装后版本 ($installed_version) 仍低于要求的 $min_version，请选择其它内核版本或升级系统。"
-                                exit 1
-                        fi
-                fi
-                return
-        fi
-
-        echo "$context 所需的依赖 $pkg 安装失败，请手动处理或选择其它内核版本。"
-        exit 1
-}
-
-ensure_linux_kbuild_package() {
-        local pkg="$1"
-        local min_version="$2"
-
-        ensure_generic_dependency "$pkg" "$min_version" "cloud headers"
-}
-
-ensure_gcc_for_host_package() {
-        local pkg="$1"
-        local min_version="$2"
-
-        ensure_generic_dependency "$pkg" "$min_version" "cloud headers"
 }
 
 #启用BBR+fq
