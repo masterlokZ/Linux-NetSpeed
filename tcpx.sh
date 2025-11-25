@@ -1064,14 +1064,39 @@ installcloud() {
                 sudo dpkg -i "$HEADER_DEB_FILE"
             fi
             
-            # 尝试修复依赖
+           # 尝试修复依赖
             sudo apt-get install -f -y 
+
+            # --- 新增：安全检查逻辑 (开始) ---
+            echo "正在严格验证内核是否安装成功..."
+            
+            # 逻辑说明：
+            # 1. dpkg -l 列出包
+            # 2. grep "^ii" 筛选出已成功安装的包
+            # 3. grep "linux-image" 找内核包
+            # 4. grep "${SELECTED_VERSION}" 确认版本号包含我们要装的那个
+            
+            if ! dpkg -l | grep "^ii" | grep "linux-image" | grep -q "${SELECTED_VERSION}"; then
+                echo -e "\n${Error} 【危险警告】内核安装失败！"
+                echo -e "${Error} 系统包管理器可能因依赖错误已自动移除了目标内核。"
+                echo -e "${Error} 为了防止重启失联，脚本将【终止运行】，**绝对不会**更新 GRUB 引导。"
+                echo -e "${Tip} 你的系统引导未被修改，重启是安全的（将进入旧内核）。"
+                echo -e "${Tip} 请尝试选择其他稳定版本（如 6.1.x 或 5.10.x）。\n"
+                
+                # 清理文件并直接退出函数，不执行后面的 BBR_grub
+                rm -f "$IMAGE_DEB_FILE" "$HEADER_DEB_FILE" "$VERSION_MAP_FILE"
+                return 1
+            else
+                echo -e "${Info} 验证通过：内核 ${SELECTED_VERSION} 已成功安装。"
+            fi
+            # --- 新增：安全检查逻辑 (结束) ---
 
             # 清理
             rm -f "$IMAGE_DEB_FILE" "$HEADER_DEB_FILE" "$VERSION_MAP_FILE"
             # --- 修复逻辑结束 ---
     fi
 
+    # 只有通过了上面的检查，才会执行这里
     BBR_grub
     echo -e "${Tip} 内核安装完毕，请参考上面的信息检查是否安装成功,默认从排第一的高版本内核启动"
     check_kernel
