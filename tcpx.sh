@@ -948,8 +948,8 @@ installcloud() {
 	# --- 定义下载源 ---
 	local IMAGE_URL
 	local IMAGE_PATTERN
-	# 这是一个包含所有内核相关包的巨大列表页面
 	local HEADERS_URL="https://deb.debian.org/debian/pool/main/l/linux/"
+    local ARCH_TAG="amd64"
 
 	if [ "$ARCH" == "x86_64" ]; then
 		IMAGE_URL="https://deb.debian.org/debian/pool/main/l/linux-signed-amd64/"
@@ -1025,63 +1025,68 @@ EOF
             ensure_gcc14_env
 
             echo "--------------------------------------------------------"
-            echo "正在模拟手动下载模式 (Image + Common Headers + Arch Headers)"
+            echo "正在模拟手动下载模式 (Image + Common + Kbuild + Headers)"
             echo "目标版本: $SELECTED_VERSION"
             echo "--------------------------------------------------------"
 
             # 1. 下载内核 (Image)
-            echo ">> [1/3] 下载内核 Image..."
+            echo ">> [1/4] 下载内核 Image..."
             if ! curl -fSL -O "$IMAGE_URL$IMAGE_DEB_FILE"; then echo "下载失败。" ; rm -f "$VERSION_MAP_FILE" ; exit 1 ; fi
 
             # 2. 计算搜索关键词
-            # 逻辑：如果版本是 6.12.57+deb13-cloud-amd64，去掉后缀得到 6.12.57+deb13
-            # 然后去 html 里找 linux-headers-6.12.57+deb13-common 和 linux-headers-6.12.57+deb13-cloud-amd64
-            
             local SEARCH_VER=$(echo "$SELECTED_VERSION" | sed "s/-cloud-${ARCH_TAG}//")
             # 关键：对 + 号进行转义，用于 grep 搜索
             local SEARCH_VER_ESCAPED=$(echo "$SEARCH_VER" | sed 's/+/\\+/g')
 
-            echo ">> 获取 Headers 文件列表..."
-            # 下载目录索引页面
+            echo ">> 获取 Headers/Kbuild 文件列表..."
             local HTML_CONTENT=$(curl -sL "$HEADERS_URL")
 
-            # 3. 匹配 Common Headers 文件名
-            echo ">> 正在搜索 Common Headers (匹配: linux-headers-${SEARCH_VER}-common)..."
-            # 使用正则提取 href="filename" 中的 filename
+            # 3. 匹配文件 (Common, Kbuild, Arch Headers)
+            echo ">> 正在搜索依赖文件..."
+            
             local COMMON_DEB=$(echo "$HTML_CONTENT" | grep -oP "href=\"linux-headers-${SEARCH_VER_ESCAPED}-common_[^\"]+_all\.deb\"" | cut -d'"' -f2 | sort -V | tail -n 1)
+            
+            # 新增：搜索 Kbuild 包
+            local KBUILD_DEB=$(echo "$HTML_CONTENT" | grep -oP "href=\"linux-kbuild-${SEARCH_VER_ESCAPED}_[^\"]+_${ARCH_TAG}\.deb\"" | cut -d'"' -f2 | sort -V | tail -n 1)
 
-            # 4. 匹配 Arch Headers 文件名
-            echo ">> 正在搜索 Arch Headers (匹配: linux-headers-${SEARCH_VER}-cloud-${ARCH_TAG})..."
             local ARCH_DEB=$(echo "$HTML_CONTENT" | grep -oP "href=\"linux-headers-${SEARCH_VER_ESCAPED}-cloud-${ARCH_TAG}_[^\"]+_${ARCH_TAG}\.deb\"" | cut -d'"' -f2 | sort -V | tail -n 1)
 
-            # 5. 下载 Headers
+            # 4. 下载文件
             if [ -n "$COMMON_DEB" ]; then
-                echo ">> [2/3] 下载 Common Headers: $COMMON_DEB"
+                echo ">> [2/4] 下载 Common Headers: $COMMON_DEB"
                 wget -O "$COMMON_DEB" "$HEADERS_URL$COMMON_DEB"
             else
-                echo "Error: 未找到 Common Headers 文件，可能官方源尚未同步或版本正则不匹配。"
+                echo "Error: 未找到 Common Headers。"
+            fi
+
+            if [ -n "$KBUILD_DEB" ]; then
+                echo ">> [3/4] 下载 Linux Kbuild: $KBUILD_DEB"
+                wget -O "$KBUILD_DEB" "$HEADERS_URL$KBUILD_DEB"
+            else
+                echo "Error: 未找到 Kbuild 包 (这是导致之前失败的关键)。"
             fi
 
             if [ -n "$ARCH_DEB" ]; then
-                echo ">> [3/3] 下载 Arch Headers: $ARCH_DEB"
+                echo ">> [4/4] 下载 Arch Headers: $ARCH_DEB"
                 wget -O "$ARCH_DEB" "$HEADERS_URL$ARCH_DEB"
             else
-                 echo "Error: 未找到 Arch Headers 文件。"
+                 echo "Error: 未找到 Arch Headers。"
             fi
 
-            # 6. 安装
+            # 5. 安装
             echo ">> 开始安装已下载的文件..."
             ensure_cloud_predepends "$IMAGE_DEB_FILE"
             
             # 构造安装列表
             local INSTALL_FILES="$IMAGE_DEB_FILE"
             [ -f "$COMMON_DEB" ] && INSTALL_FILES="$INSTALL_FILES $COMMON_DEB"
+            [ -f "$KBUILD_DEB" ] && INSTALL_FILES="$INSTALL_FILES $KBUILD_DEB"
             [ -f "$ARCH_DEB" ] && INSTALL_FILES="$INSTALL_FILES $ARCH_DEB"
 
             echo "执行命令: dpkg -i $INSTALL_FILES"
             sudo dpkg -i $INSTALL_FILES
             
-            echo ">> 修复潜在依赖 (自动补全 kbuild/gcc 等)..."
+            echo ">> 修复潜在依赖..."
             sudo apt-get install -f -y 
 
             # 清理临时源
@@ -1090,17 +1095,18 @@ EOF
                 sudo apt update >/dev/null 2>&1
             fi
 
-            # 7. 验证结果
+            # 6. 验证结果
             echo "--------------------------------------------------------"
             echo "正在验证安装状态..."
+            # 只要 headers 包是 ii 状态，说明依赖全齐了
             if dpkg -l | grep "^ii" | grep "linux-headers" | grep -q "${SELECTED_VERSION}"; then
                  echo -e "${Info} 完美！内核与头文件均已安装并匹配。"
             else
-                 echo -e "${Error} 警告：内核已安装，但头文件检测失败。"
+                 echo -e "${Error} 警告：内核已安装，但头文件检测失败 (请检查上方是否有 Kbuild 下载失败的错误)。"
             fi
             
             # 清理文件
-            rm -f "$IMAGE_DEB_FILE" "$COMMON_DEB" "$ARCH_DEB" "$VERSION_MAP_FILE"
+            rm -f "$IMAGE_DEB_FILE" "$COMMON_DEB" "$KBUILD_DEB" "$ARCH_DEB" "$VERSION_MAP_FILE"
     fi
 
     BBR_grub
