@@ -847,147 +847,208 @@ installxanmod() {
 #2022.9.6 改为https://github.com/UJX6N/bbrplus-5.19
 #2022.11.24 改为https://github.com/UJX6N/bbrplus-6.x_stable
 
+installbbrplusnew() {
+	github_ver_plus=$(curl -s https://api.github.com/repos/UJX6N/bbrplus-6.x_stable/releases | grep /bbrplus-6.x_stable/releases/tag/ | head -1 | awk -F "[/]" '{print $8}' | awk -F "[\"]" '{print $1}')
+	github_ver_plus_num=$(curl -s https://api.github.com/repos/UJX6N/bbrplus-6.x_stable/releases | grep /bbrplus-6.x_stable/releases/tag/ | head -1 | awk -F "[/]" '{print $8}' | awk -F "[\"]" '{print $1}' | awk -F "[-]" '{print $1}')
+	echo -e "获取的UJX6N的bbrplus-6.x_stable版本号为:${Green_font_prefix}${github_ver_plus}${Font_color_suffix}"
+	echo -e "如果下载地址出错，可能当前正在更新，超过半天还是出错请反馈，大陆自行解决污染问题"
+	echo -e "${Green_font_prefix}安装失败这边反馈，内核问题给UJX6N反馈${Font_color_suffix}"
+	# kernel_version=$github_ver_plus
+
+	bit=$(uname -m)
+	#if [[ ${bit} != "x86_64" ]]; then
+	#  echo -e "${Error} 不支持x86_64以外的系统 !" && exit 1
+	#fi
+	rm -rf bbrplusnew
+	mkdir bbrplusnew && cd bbrplusnew || exit
+	if [[ "${OS_type}" == "CentOS" ]]; then
+		if [[ ${version} == "7" ]]; then
+			if [[ ${bit} == "x86_64" ]]; then
+				kernel_version=${github_ver_plus_num}-bbrplus
+				detele_kernel_head
+				headurl=$(curl -s 'https://api.github.com/repos/UJX6N/bbrplus-6.x_stable/releases' | grep "${github_ver_plus}" | grep 'rpm' | grep 'headers' | grep 'el7' | awk -F '"' '{print $4}' | grep 'http')
+				imgurl=$(curl -s 'https://api.github.com/repos/UJX6N/bbrplus-6.x_stable/releases' | grep "${github_ver_plus}" | grep 'rpm' | grep -v 'devel' | grep -v 'headers' | grep -v 'Source' | grep 'el7' | awk -F '"' '{print $4}' | grep 'http')
+
+				headurl=$(check_cn "$headurl")
+				imgurl=$(check_cn "$imgurl")
+
+				wget -O kernel-c7.rpm "$headurl"
+				wget -O kernel-headers-c7.rpm "$imgurl"
+				yum install -y kernel-c7.rpm
+				yum install -y kernel-headers-c7.rpm
+			else
+				echo -e "${Error} 不支持x86_64以外的系统 !" && exit 1
+			fi
+		fi
+		if [[ ${version} == "8" ]]; then
+			if [[ ${bit} == "x86_64" ]]; then
+				kernel_version=${github_ver_plus_num}-bbrplus
+				detele_kernel_head
+				headurl=$(curl -s 'https://api.github.com/repos/UJX6N/bbrplus-6.x_stable/releases' | grep "${github_ver_plus}" | grep 'rpm' | grep 'headers' | grep 'el8.x86_64' | grep 'https' | awk -F '"' '{print $4}' | grep 'http')
+				imgurl=$(curl -s 'https://api.github.com/repos/UJX6N/bbrplus-6.x_stable/releases' | grep "${github_ver_plus}" | grep 'rpm' | grep -v 'devel' | grep -v 'headers' | grep -v 'Source' | grep 'el8.x86_64' | grep 'https' | awk -F '"' '{print $4}' | grep 'http')
+
+				headurl=$(check_cn "$headurl")
+				imgurl=$(check_cn "$imgurl")
+
+				wget -O kernel-c8.rpm "$headurl"
+				wget -O kernel-headers-c8.rpm "$imgurl"
+				yum install -y kernel-c8.rpm
+				yum install -y kernel-headers-c8.rpm
+			else
+				echo -e "${Error} 不支持x86_64以外的系统 !" && exit 1
+			fi
+		fi
+	elif [[ "${OS_type}" == "Debian" ]]; then
+		if [[ ${bit} == "x86_64" ]]; then
+			kernel_version=${github_ver_plus_num}-bbrplus
+			detele_kernel_head
+			headurl=$(curl -s 'https://api.github.com/repos/UJX6N/bbrplus-6.x_stable/releases' | grep "${github_ver_plus}" | grep 'https' | grep 'amd64.deb' | grep 'headers' | awk -F '"' '{print $4}' | grep 'http')
+			imgurl=$(curl -s 'https://api.github.com/repos/UJX6N/bbrplus-6.x_stable/releases' | grep "${github_ver_plus}" | grep 'https' | grep 'amd64.deb' | grep 'image' | awk -F '"' '{print $4}' | grep 'http')
+
+			headurl=$(check_cn "$headurl")
+			imgurl=$(check_cn "$imgurl")
+
+			download_file "$headurl" linux-headers-d10.deb
+			download_file "$imgurl" linux-image-d10.deb
+			dpkg -i linux-image-d10.deb
+			dpkg -i linux-headers-d10.deb
+		elif [[ ${bit} == "aarch64" ]]; then
+			kernel_version=${github_ver_plus_num}-bbrplus
+			detele_kernel_head
+			headurl=$(curl -s 'https://api.github.com/repos/UJX6N/bbrplus-6.x_stable/releases' | grep "${github_ver_plus}" | grep 'https' | grep 'arm64.deb' | grep 'headers' | awk -F '"' '{print $4}')
+			imgurl=$(curl -s 'https://api.github.com/repos/UJX6N/bbrplus-6.x_stable/releases' | grep "${github_ver_plus}" | grep 'https' | grep 'arm64.deb' | grep 'image' | awk -F '"' '{print $4}')
+
+			headurl=$(check_cn "$headurl")
+			imgurl=$(check_cn "$imgurl")
+
+			download_file "$headurl" linux-headers-d10.deb
+			download_file "$imgurl" linux-image-d10.deb
+			dpkg -i linux-image-d10.deb
+			dpkg -i linux-headers-d10.deb
+		else
+			echo -e "${Error} 不支持x86_64及arm64/aarch64以外的系统 !" && exit 1
+		fi
+	fi
+
+	cd .. && rm -rf bbrplusnew
+	BBR_grub
+	echo -e "${Tip} 内核安装完毕，请参考上面的信息检查是否安装成功,默认从排第一的高版本内核启动"
+	check_kernel
+
+}
+
 #安装cloud内核
 installcloud() {
+
 	# 检查当前系统发行版
 	local DISTRO=$(grep -oP '(?<=^ID=).+' /etc/os-release | tr -d '"')
 	local ARCH=$(uname -m)
 	local VERSIONS=()
 	local VERSION_MAP_FILE="/tmp/version_map.txt"
 
-	# --- 定义下载源 ---
+	# 检查架构并设置 IMAGE_URL 和 IMAGE_PATTERN
 	local IMAGE_URL
 	local IMAGE_PATTERN
-	local HEADERS_URL="https://deb.debian.org/debian/pool/main/l/linux/"
-	local ARCH_TAG="amd64"
-
 	if [ "$ARCH" == "x86_64" ]; then
 		IMAGE_URL="https://deb.debian.org/debian/pool/main/l/linux-signed-amd64/"
 		IMAGE_PATTERN='linux-image-[^"]+cloud-amd64_[^"]+_amd64\.deb'
-		ARCH_TAG="amd64"
 	elif [ "$ARCH" == "aarch64" ]; then
 		IMAGE_URL="https://deb.debian.org/debian/pool/main/l/linux-signed-arm64/"
 		IMAGE_PATTERN='linux-image-[^"]+cloud-arm64_[^"]+_arm64\.deb'
-		ARCH_TAG="arm64"
 	else
-		echo "不支持的架构：$ARCH" ; exit 1
+		echo "不支持的架构：$ARCH，仅支持 x86_64 和 aarch64"
+		exit 1
 	fi
 
-	echo "检测到架构 $ARCH，正在获取内核版本列表..."
-	
-	local DEB_FILES_RAW=$(curl -sL "$IMAGE_URL" | grep -oP "$IMAGE_PATTERN")
+	echo "检测到架构 $ARCH，正在从官方源获取cloud内核版本..."
+
+	# 获取 cloud 内核 .deb 文件列表
+	local DEB_FILES_RAW=$(curl -s "$IMAGE_URL" | grep -oP "$IMAGE_PATTERN")
+
+	# 清空临时映射文件
 	>"$VERSION_MAP_FILE"
+
+	# 提取 image 版本号并写入映射文件
 	while IFS= read -r file; do
-		if [[ "$file" =~ linux-image-([0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9]+)?(\+[a-zA-Z0-9]+)?) ]]; then
+		if [[ "$file" =~ linux-image-([0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9]+)?) ]]; then
 			local ver="${BASH_REMATCH[1]}"
 			echo "$ver:$file" >>"$VERSION_MAP_FILE"
 		fi
 	done <<<"$DEB_FILES_RAW"
+
+	# 读取排序并去重后的版本号
 	mapfile -t VERSIONS < <(cut -d':' -f1 "$VERSION_MAP_FILE" | sort -V -u)
 
-	if [ ${#VERSIONS[@]} -eq 0 ]; then echo "未找到可用版本。" ; exit 1 ; fi
+	# 确保有可用版本
+	if [ ${#VERSIONS[@]} -eq 0 ]; then
+		echo "未找到可用的cloud内核版本，请检查网络或反馈。"
+		exit 1
+	fi
 
-	echo "可用 Cloud 内核版本："
-	for i in "${!VERSIONS[@]}"; do echo "  $i) [${VERSIONS[$i]}]" ; done
+	echo "检测到 $DISTRO 系统（架构 $ARCH），以下是从 Debian 签名cloud内核列表中获取的版本（按从小到大排序，已去重）："
+	for i in "${!VERSIONS[@]}"; do
+		echo "  $i) [${VERSIONS[$i]}]"
+	done
 
+	# 默认选择最新版本
 	local DEFAULT_INDEX=$((${#VERSIONS[@]} - 1))
-	echo "【提示】Debian 12 用户安装 6.12+ 版本脚本会自动配置 GCC-14。"
-	read -t 10 -p "输入选项编号或'h' (默认最新): " CHOICE
+	echo "请选择要安装的cloud内核版本（10秒后默认选择最新版本回车加速 ${VERSIONS[$DEFAULT_INDEX]}，输入'h'则使用apt安装非最新cloud及headers）："
+	read -t 10 -p "输入选项编号或'h': " CHOICE
 
+	# 检查是否使用 apt 安装 cloud 及 headers
 	local USE_APT=false
 	if [[ "$CHOICE" =~ ^[hH]$ ]]; then
 		USE_APT=true
-		if [ "$DISTRO" != "debian" ]; then echo "仅支持 Debian。" ; exit 1 ; fi
+		if [ "$DISTRO" != "debian" ]; then
+			echo "错误：使用 'h' 安装 headers 仅支持 Debian 系统，当前系统为 $DISTRO"
+			exit 1
+		fi
 		CHOICE=$DEFAULT_INDEX
 	else
 		CHOICE=${CHOICE:-$DEFAULT_INDEX}
 	fi
-	if [[ ! "$CHOICE" =~ ^[0-9]+$ ]] || [ "$CHOICE" -lt 0 ] || [ "$CHOICE" -ge "${#VERSIONS[@]}" ]; then CHOICE=$DEFAULT_INDEX ; fi
+
+	# 验证输入
+	if [[ ! "$CHOICE" =~ ^[0-9]+$ ]] || [ "$CHOICE" -lt 0 ] || [ "$CHOICE" -ge "${#VERSIONS[@]}" ]; then
+		echo "无效选项，默认安装最新版本 ${VERSIONS[$DEFAULT_INDEX]}..."
+		CHOICE=$DEFAULT_INDEX
+	fi
 
 	local SELECTED_VERSION="${VERSIONS[$CHOICE]}"
 	local IMAGE_DEB_FILE=$(grep "^$SELECTED_VERSION:" "$VERSION_MAP_FILE" | tail -n 1 | cut -d':' -f2)
+
 	kernel_version=$SELECTED_VERSION
 
-    # --- 环境配置: GCC-14 ---
-    ensure_gcc14_env() {
-        if [[ "$SELECTED_VERSION" =~ ^6\.(1[2-9]|[2-9]) ]] && grep -qE "bookworm|12" /etc/os-release; then
-            echo ">> [环境准备] 检测到高版本内核，正在临时配置 GCC-14 依赖..."
-            if dpkg -l | grep -q "gcc-14"; then return; fi
-            echo 'deb http://deb.debian.org/debian sid main' > /etc/apt/sources.list.d/sid-safe-install.list
-            cat > /etc/apt/preferences.d/sid-safe-install <<EOF
-Package: *
-Pin: release n=sid
-Pin-Priority: 100
-EOF
-            sudo apt update
-            sudo apt install -y -t sid gcc-14
+	# 如果选择 'h'，使用 apt 安装 cloud 内核及 headers
+        if [ "$USE_APT" = true ]; then
+                echo "正在使用 apt 安装 linux-image-cloud-${ARCH} 及 headers..."
+                sudo apt update
+                if [ "$ARCH" == "x86_64" ]; then
+                        sudo apt install -y "linux-image-cloud-amd64" "linux-headers-cloud-amd64"
+                elif [ "$ARCH" == "aarch64" ]; then
+                        sudo apt install -y "linux-image-cloud-arm64" "linux-headers-cloud-arm64"
+                fi
+        else
+                # 下载并安装 image
+                echo "正在下载 $IMAGE_URL$IMAGE_DEB_FILE ..."
+                if ! curl -fSL -O "$IMAGE_URL$IMAGE_DEB_FILE"; then
+                        echo "下载内核文件失败，请检查网络后重试。"
+                        rm -f "$VERSION_MAP_FILE"
+                        exit 1
+                fi
+                ensure_cloud_predepends "$IMAGE_DEB_FILE"
+                echo "正在安装 $IMAGE_DEB_FILE ..."
+                sudo dpkg -i "$IMAGE_DEB_FILE"
+                sudo apt-get install -f -y # 解决可能的依赖问题
         fi
-    }
 
-    if [ "$USE_APT" = true ]; then
-            echo "使用 apt 安装..."
-            sudo apt update
-            sudo apt install -y "linux-image-cloud-${ARCH_TAG}" "linux-headers-cloud-${ARCH_TAG}"
-    else
-            ensure_gcc14_env
-            echo "--------------------------------------------------------"
-            echo "正在模拟手动下载模式 (Image + Common + Kbuild + Headers)"
-            echo "目标版本: $SELECTED_VERSION"
-            echo "--------------------------------------------------------"
+        # 清理下载的文件
+        rm -f "$IMAGE_DEB_FILE" "$VERSION_MAP_FILE"
 
-            # 1. 下载内核 (Image)
-            echo ">> [1/4] 下载内核 Image..."
-            if ! curl -fSL -O "$IMAGE_URL$IMAGE_DEB_FILE"; then echo "下载失败。" ; rm -f "$VERSION_MAP_FILE" ; exit 1 ; fi
+        BBR_grub
+        echo -e "${Tip} 内核安装完毕，请参考上面的信息检查是否安装成功,默认从排第一的高版本内核启动"
+        check_kernel
 
-            # 2. 计算搜索关键词 (转义 + 号)
-            local SEARCH_VER=$(echo "$SELECTED_VERSION" | sed "s/-cloud-${ARCH_TAG}//")
-            local SEARCH_VER_ESCAPED=$(echo "$SEARCH_VER" | sed 's/+/\\+/g')
-
-            echo ">> 获取 Headers/Kbuild 文件列表..."
-            local HTML_CONTENT=$(curl -sL "$HEADERS_URL")
-
-            # 3. 匹配文件
-            local COMMON_DEB=$(echo "$HTML_CONTENT" | grep -oP "href=\"linux-headers-${SEARCH_VER_ESCAPED}-common_[^\"]+_all\.deb\"" | cut -d'"' -f2 | sort -V | tail -n 1)
-            local KBUILD_DEB=$(echo "$HTML_CONTENT" | grep -oP "href=\"linux-kbuild-${SEARCH_VER_ESCAPED}_[^\"]+_${ARCH_TAG}\.deb\"" | cut -d'"' -f2 | sort -V | tail -n 1)
-            local ARCH_DEB=$(echo "$HTML_CONTENT" | grep -oP "href=\"linux-headers-${SEARCH_VER_ESCAPED}-cloud-${ARCH_TAG}_[^\"]+_${ARCH_TAG}\.deb\"" | cut -d'"' -f2 | sort -V | tail -n 1)
-
-            # 4. 下载文件
-            [ -n "$COMMON_DEB" ] && wget -O "$COMMON_DEB" "$HEADERS_URL$COMMON_DEB"
-            [ -n "$KBUILD_DEB" ] && wget -O "$KBUILD_DEB" "$HEADERS_URL$KBUILD_DEB"
-            [ -n "$ARCH_DEB" ] && wget -O "$ARCH_DEB" "$HEADERS_URL$ARCH_DEB"
-
-            # 5. 安装
-            echo ">> 开始安装已下载的文件..."
-            ensure_cloud_predepends "$IMAGE_DEB_FILE"
-            local INSTALL_FILES="$IMAGE_DEB_FILE"
-            [ -f "$COMMON_DEB" ] && INSTALL_FILES="$INSTALL_FILES $COMMON_DEB"
-            [ -f "$KBUILD_DEB" ] && INSTALL_FILES="$INSTALL_FILES $KBUILD_DEB"
-            [ -f "$ARCH_DEB" ] && INSTALL_FILES="$INSTALL_FILES $ARCH_DEB"
-
-            echo "执行命令: dpkg -i $INSTALL_FILES"
-            sudo dpkg -i $INSTALL_FILES
-            sudo apt-get install -f -y 
-
-            # 清理临时源
-            if [ -f "/etc/apt/sources.list.d/sid-safe-install.list" ]; then
-                rm -f /etc/apt/sources.list.d/sid-safe-install.list /etc/apt/preferences.d/sid-safe-install
-                sudo apt update >/dev/null 2>&1
-            fi
-
-            # 6. 验证结果
-            echo "--------------------------------------------------------"
-            if dpkg -l | grep "^ii" | grep "linux-headers" | grep -q "${SELECTED_VERSION}"; then
-                 echo -e "${Info} 完美！内核与头文件均已安装并匹配。"
-            else
-                 echo -e "${Error} 警告：内核已安装，但头文件检测失败。"
-            fi
-            
-            rm -f "$IMAGE_DEB_FILE" "$COMMON_DEB" "$KBUILD_DEB" "$ARCH_DEB" "$VERSION_MAP_FILE"
-    fi
-
-    BBR_grub
-    echo -e "${Tip} 内核安装完毕，请参考上面的信息检查是否安装成功,默认从排第一的高版本内核启动"
-    check_kernel
 }
 
 ensure_cloud_predepends() {
