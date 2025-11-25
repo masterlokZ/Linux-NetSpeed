@@ -1028,18 +1028,53 @@ installcloud() {
                 elif [ "$ARCH" == "aarch64" ]; then
                         sudo apt install -y "linux-image-cloud-arm64" "linux-headers-cloud-arm64"
                 fi
-        else
-                # 下载并安装 image
-                echo "正在下载 $IMAGE_URL$IMAGE_DEB_FILE ..."
+       else
+                # --- 修改开始：下载并安装 image 和 headers ---
+                
+                # 1. 自动推导 headers 的文件名匹配模式
+                local HEADER_PATTERN=${IMAGE_PATTERN/linux-image/linux-headers}
+                
+                # 2. 从官方源中查找与当前选中版本 (SELECTED_VERSION) 匹配的 headers 文件
+                echo "正在查找对应的 headers 文件..."
+                # 这里的逻辑是：再次请求目录，搜索 linux-headers 开头且包含版本号的文件
+                local HEADER_DEB_FILE=$(curl -s "$IMAGE_URL" | grep -oP "$HEADER_PATTERN" | grep "${SELECTED_VERSION}" | sort -V | tail -n 1)
+
+                # 3. 下载 image
+                echo "正在下载内核(Image): $IMAGE_URL$IMAGE_DEB_FILE ..."
                 if ! curl -fSL -O "$IMAGE_URL$IMAGE_DEB_FILE"; then
                         echo "下载内核文件失败，请检查网络后重试。"
                         rm -f "$VERSION_MAP_FILE"
                         exit 1
                 fi
+
+                # 4. 下载 headers (如果找到了的话)
+                if [ -n "$HEADER_DEB_FILE" ]; then
+                    echo "正在下载头文件(Headers): $IMAGE_URL$HEADER_DEB_FILE ..."
+                    if ! curl -fSL -O "$IMAGE_URL$HEADER_DEB_FILE"; then
+                        echo "警告：Headers 下载失败，将只安装内核。"
+                    else
+                        echo "Headers 下载成功。"
+                    fi
+                else
+                    echo "警告：未在源中找到对应的 Headers 文件，将只安装内核。"
+                fi
+
+                # 5. 处理依赖并安装
                 ensure_cloud_predepends "$IMAGE_DEB_FILE"
-                echo "正在安装 $IMAGE_DEB_FILE ..."
+                
+                echo "正在安装内核文件..."
                 sudo dpkg -i "$IMAGE_DEB_FILE"
+                
+                if [ -f "$HEADER_DEB_FILE" ]; then
+                    echo "正在安装头文件..."
+                    sudo dpkg -i "$HEADER_DEB_FILE"
+                fi
+
                 sudo apt-get install -f -y # 解决可能的依赖问题
+                
+                # 清理 headers 文件
+                [ -f "$HEADER_DEB_FILE" ] && rm -f "$HEADER_DEB_FILE"
+                # --- 修改结束 ---
         fi
 
         # 清理下载的文件
