@@ -939,7 +939,6 @@ installbbrplusnew() {
 
 #安装cloud内核
 installcloud() {
-
 	# 检查当前系统发行版
 	local DISTRO=$(grep -oP '(?<=^ID=).+' /etc/os-release | tr -d '"')
 	local ARCH=$(uname -m)
@@ -985,15 +984,15 @@ installcloud() {
 		exit 1
 	fi
 
-	echo "检测到 $DISTRO 系统（架构 $ARCH），以下是从 Debian 签名cloud内核列表中获取的版本（按从小到大排序，已去重）："
+	echo "检测到 $DISTRO 系统（架构 $ARCH），以下是从 Debian 签名cloud内核列表中获取的版本："
 	for i in "${!VERSIONS[@]}"; do
 		echo "  $i) [${VERSIONS[$i]}]"
 	done
 
 	# 默认选择最新版本
 	local DEFAULT_INDEX=$((${#VERSIONS[@]} - 1))
-	echo "请选择要安装的cloud内核版本（10秒后默认选择最新版本回车加速 ${VERSIONS[$DEFAULT_INDEX]}，输入'h'则使用apt安装非最新cloud及headers）："
-	read -t 10 -p "输入选项编号或'h': " CHOICE
+	echo "【建议选择 6.12 或 6.1 开头的稳定版本，避免选择 6.16+ 的实验版本】"
+	read -t 10 -p "输入选项编号或'h' (默认最新): " CHOICE
 
 	# 检查是否使用 apt 安装 cloud 及 headers
 	local USE_APT=false
@@ -1020,70 +1019,62 @@ installcloud() {
 	kernel_version=$SELECTED_VERSION
 
 	# 如果选择 'h'，使用 apt 安装 cloud 内核及 headers
-        if [ "$USE_APT" = true ]; then
-                echo "正在使用 apt 安装 linux-image-cloud-${ARCH} 及 headers..."
-                sudo apt update
-                if [ "$ARCH" == "x86_64" ]; then
-                        sudo apt install -y "linux-image-cloud-amd64" "linux-headers-cloud-amd64"
-                elif [ "$ARCH" == "aarch64" ]; then
-                        sudo apt install -y "linux-image-cloud-arm64" "linux-headers-cloud-arm64"
+    if [ "$USE_APT" = true ]; then
+            echo "正在使用 apt 安装 linux-image-cloud-${ARCH} 及 headers..."
+            sudo apt update
+            if [ "$ARCH" == "x86_64" ]; then
+                    sudo apt install -y "linux-image-cloud-amd64" "linux-headers-cloud-amd64"
+            elif [ "$ARCH" == "aarch64" ]; then
+                    sudo apt install -y "linux-image-cloud-arm64" "linux-headers-cloud-arm64"
+            fi
+    else
+            # --- 修复逻辑开始：同时下载 Image 和 Headers ---
+            local HEADER_PATTERN=${IMAGE_PATTERN/linux-image/linux-headers}
+            
+            echo "正在查找对应的 headers 文件..."
+            # 搜索匹配版本的 headers
+            local HEADER_DEB_FILE=$(curl -s "$IMAGE_URL" | grep -oP "$HEADER_PATTERN" | grep "${SELECTED_VERSION}" | sort -V | tail -n 1)
+
+            # 下载 Image
+            echo "正在下载内核(Image): $IMAGE_URL$IMAGE_DEB_FILE ..."
+            if ! curl -fSL -O "$IMAGE_URL$IMAGE_DEB_FILE"; then
+                    echo "下载内核文件失败，请检查网络后重试。"
+                    rm -f "$VERSION_MAP_FILE"
+                    exit 1
+            fi
+
+            # 下载 Headers
+            if [ -n "$HEADER_DEB_FILE" ]; then
+                echo "正在下载头文件(Headers): $IMAGE_URL$HEADER_DEB_FILE ..."
+                if ! curl -fSL -O "$IMAGE_URL$HEADER_DEB_FILE"; then
+                    echo "警告：Headers 下载失败，将只安装内核。"
+                    HEADER_DEB_FILE=""
                 fi
-       else
-                # --- 修改开始：下载并安装 image 和 headers ---
-                
-                # 1. 自动推导 headers 的文件名匹配模式
-                local HEADER_PATTERN=${IMAGE_PATTERN/linux-image/linux-headers}
-                
-                # 2. 从官方源中查找与当前选中版本 (SELECTED_VERSION) 匹配的 headers 文件
-                echo "正在查找对应的 headers 文件..."
-                # 这里的逻辑是：再次请求目录，搜索 linux-headers 开头且包含版本号的文件
-                local HEADER_DEB_FILE=$(curl -s "$IMAGE_URL" | grep -oP "$HEADER_PATTERN" | grep "${SELECTED_VERSION}" | sort -V | tail -n 1)
+            else
+                echo "警告：未在源中找到对应的 Headers 文件，将只安装内核。"
+            fi
 
-                # 3. 下载 image
-                echo "正在下载内核(Image): $IMAGE_URL$IMAGE_DEB_FILE ..."
-                if ! curl -fSL -O "$IMAGE_URL$IMAGE_DEB_FILE"; then
-                        echo "下载内核文件失败，请检查网络后重试。"
-                        rm -f "$VERSION_MAP_FILE"
-                        exit 1
-                fi
+            ensure_cloud_predepends "$IMAGE_DEB_FILE"
+            
+            echo "正在安装内核文件..."
+            sudo dpkg -i "$IMAGE_DEB_FILE"
+            
+            if [ -n "$HEADER_DEB_FILE" ] && [ -f "$HEADER_DEB_FILE" ]; then
+                echo "正在安装头文件..."
+                sudo dpkg -i "$HEADER_DEB_FILE"
+            fi
+            
+            # 尝试修复依赖
+            sudo apt-get install -f -y 
 
-                # 4. 下载 headers (如果找到了的话)
-                if [ -n "$HEADER_DEB_FILE" ]; then
-                    echo "正在下载头文件(Headers): $IMAGE_URL$HEADER_DEB_FILE ..."
-                    if ! curl -fSL -O "$IMAGE_URL$HEADER_DEB_FILE"; then
-                        echo "警告：Headers 下载失败，将只安装内核。"
-                    else
-                        echo "Headers 下载成功。"
-                    fi
-                else
-                    echo "警告：未在源中找到对应的 Headers 文件，将只安装内核。"
-                fi
+            # 清理
+            rm -f "$IMAGE_DEB_FILE" "$HEADER_DEB_FILE" "$VERSION_MAP_FILE"
+            # --- 修复逻辑结束 ---
+    fi
 
-                # 5. 处理依赖并安装
-                ensure_cloud_predepends "$IMAGE_DEB_FILE"
-                
-                echo "正在安装内核文件..."
-                sudo dpkg -i "$IMAGE_DEB_FILE"
-                
-                if [ -f "$HEADER_DEB_FILE" ]; then
-                    echo "正在安装头文件..."
-                    sudo dpkg -i "$HEADER_DEB_FILE"
-                fi
-
-                sudo apt-get install -f -y # 解决可能的依赖问题
-                
-                # 清理 headers 文件
-                [ -f "$HEADER_DEB_FILE" ] && rm -f "$HEADER_DEB_FILE"
-                # --- 修改结束 ---
-        fi
-
-        # 清理下载的文件
-        rm -f "$IMAGE_DEB_FILE" "$VERSION_MAP_FILE"
-
-        BBR_grub
-        echo -e "${Tip} 内核安装完毕，请参考上面的信息检查是否安装成功,默认从排第一的高版本内核启动"
-        check_kernel
-
+    BBR_grub
+    echo -e "${Tip} 内核安装完毕，请参考上面的信息检查是否安装成功,默认从排第一的高版本内核启动"
+    check_kernel
 }
 
 ensure_cloud_predepends() {
