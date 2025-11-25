@@ -945,9 +945,12 @@ installcloud() {
 	local VERSIONS=()
 	local VERSION_MAP_FILE="/tmp/version_map.txt"
 
-	# 检查架构并设置 IMAGE_URL 和 IMAGE_PATTERN
+	# --- 1. 定义下载源地址 ---
 	local IMAGE_URL
 	local IMAGE_PATTERN
+	# Headers 通常都在 main/l/linux/ 目录下，不区分架构目录
+	local HEADERS_URL="https://deb.debian.org/debian/pool/main/l/linux/"
+
 	if [ "$ARCH" == "x86_64" ]; then
 		IMAGE_URL="https://deb.debian.org/debian/pool/main/l/linux-signed-amd64/"
 		IMAGE_PATTERN='linux-image-[^"]+cloud-amd64_[^"]+_amd64\.deb'
@@ -959,7 +962,7 @@ installcloud() {
 		exit 1
 	fi
 
-	echo "检测到架构 $ARCH，正在从官方源获取cloud内核版本..."
+	echo "检测到架构 $ARCH，正在从官方源获取cloud内核版本列表..."
 
 	# 获取 cloud 内核 .deb 文件列表
 	local DEB_FILES_RAW=$(curl -s "$IMAGE_URL" | grep -oP "$IMAGE_PATTERN")
@@ -994,7 +997,7 @@ installcloud() {
 	echo "【建议选择 6.12 或 6.1 开头的稳定版本，避免选择 6.16+ 的实验版本】"
 	read -t 10 -p "输入选项编号或'h' (默认最新): " CHOICE
 
-	# 检查是否使用 apt 安装 cloud 及 headers
+	# 检查是否使用 apt 安装
 	local USE_APT=false
 	if [[ "$CHOICE" =~ ^[hH]$ ]]; then
 		USE_APT=true
@@ -1018,7 +1021,7 @@ installcloud() {
 
 	kernel_version=$SELECTED_VERSION
 
-	# 如果选择 'h'，使用 apt 安装 cloud 内核及 headers
+    # APT 安装模式
     if [ "$USE_APT" = true ]; then
             echo "正在使用 apt 安装 linux-image-cloud-${ARCH} 及 headers..."
             sudo apt update
@@ -1028,75 +1031,88 @@ installcloud() {
                     sudo apt install -y "linux-image-cloud-arm64" "linux-headers-cloud-arm64"
             fi
     else
-            # --- 修复逻辑开始：同时下载 Image 和 Headers ---
-            local HEADER_PATTERN=${IMAGE_PATTERN/linux-image/linux-headers}
-            
-            echo "正在查找对应的 headers 文件..."
-            # 搜索匹配版本的 headers
-            local HEADER_DEB_FILE=$(curl -s "$IMAGE_URL" | grep -oP "$HEADER_PATTERN" | grep "${SELECTED_VERSION}" | sort -V | tail -n 1)
+            # --- 自动下载 Image + Headers (Common & Arch) ---
+            echo "正在准备下载内核文件 (版本: $SELECTED_VERSION)..."
 
-            # 下载 Image
-            echo "正在下载内核(Image): $IMAGE_URL$IMAGE_DEB_FILE ..."
+            # 1. 下载内核镜像 (Image)
+            echo ">> 下载内核镜像: $IMAGE_DEB_FILE"
             if ! curl -fSL -O "$IMAGE_URL$IMAGE_DEB_FILE"; then
-                    echo "下载内核文件失败，请检查网络后重试。"
+                    echo "错误：内核镜像下载失败，请检查网络。"
                     rm -f "$VERSION_MAP_FILE"
                     exit 1
             fi
 
-            # 下载 Headers
-            if [ -n "$HEADER_DEB_FILE" ]; then
-                echo "正在下载头文件(Headers): $IMAGE_URL$HEADER_DEB_FILE ..."
-                if ! curl -fSL -O "$IMAGE_URL$HEADER_DEB_FILE"; then
-                    echo "警告：Headers 下载失败，将只安装内核。"
-                    HEADER_DEB_FILE=""
-                fi
-            else
-                echo "警告：未在源中找到对应的 Headers 文件，将只安装内核。"
+            # 2. 匹配并下载 Headers
+            # 从选中的内核版本号中提取关键特征 (例如: 6.12.57+deb13)
+            # 注意：这里我们提取 SELECTED_VERSION 的主要部分用于搜索
+            local SEARCH_VER=$(echo "$SELECTED_VERSION" | sed 's/-cloud-amd64//' | sed 's/-cloud-arm64//')
+            
+            echo ">> 正在从 $HEADERS_URL 搜索匹配的 Headers 文件..."
+            # 获取 linux 目录下的所有文件列表 (可能会比较大，但为了精确匹配必须这样做)
+            # 使用 grep 预过滤以减少数据量
+            local HEADERS_LIST=$(curl -s "$HEADERS_URL" | grep "linux-headers" | grep "$SEARCH_VER")
+
+            # 查找 Common Headers (例如 linux-headers-6.12.57+deb13-common_..._all.deb)
+            local COMMON_HEADER_FILE=$(echo "$HEADERS_LIST" | grep -oP 'linux-headers-[^"]+-common_[^"]+_all\.deb' | sort -V | tail -n 1)
+
+            # 查找 Arch Headers (例如 linux-headers-6.12.57+deb13-cloud-amd64_..._amd64.deb)
+            local ARCH_HEADER_FILE=""
+            if [ "$ARCH" == "x86_64" ]; then
+                ARCH_HEADER_FILE=$(echo "$HEADERS_LIST" | grep -oP 'linux-headers-[^"]+-cloud-amd64_[^"]+_amd64\.deb' | sort -V | tail -n 1)
+            elif [ "$ARCH" == "aarch64" ]; then
+                ARCH_HEADER_FILE=$(echo "$HEADERS_LIST" | grep -oP 'linux-headers-[^"]+-cloud-arm64_[^"]+_arm64\.deb' | sort -V | tail -n 1)
             fi
 
+            # 下载 Common Header
+            if [ -n "$COMMON_HEADER_FILE" ]; then
+                echo ">> 下载通用头文件: $COMMON_HEADER_FILE"
+                curl -fSL -O "$HEADERS_URL$COMMON_HEADER_FILE"
+            else
+                echo "警告：未找到对应的 Common Headers 文件。"
+            fi
+
+            # 下载 Arch Header
+            if [ -n "$ARCH_HEADER_FILE" ]; then
+                echo ">> 下载架构头文件: $ARCH_HEADER_FILE"
+                curl -fSL -O "$HEADERS_URL$ARCH_HEADER_FILE"
+            else
+                echo "警告：未找到对应的 Arch Headers 文件。"
+            fi
+
+            # 3. 执行安装 (三剑客合体安装，避免依赖地狱)
+            echo ">> 开始安装已下载的包..."
             ensure_cloud_predepends "$IMAGE_DEB_FILE"
             
-            echo "正在安装内核文件..."
-            sudo dpkg -i "$IMAGE_DEB_FILE"
+            # 构造 dpkg 安装列表，只安装存在的文件
+            local INSTALL_LIST="$IMAGE_DEB_FILE"
+            [ -f "$COMMON_HEADER_FILE" ] && INSTALL_LIST="$INSTALL_LIST $COMMON_HEADER_FILE"
+            [ -f "$ARCH_HEADER_FILE" ] && INSTALL_LIST="$INSTALL_LIST $ARCH_HEADER_FILE"
+
+            echo "正在执行: dpkg -i $INSTALL_LIST"
+            sudo dpkg -i $INSTALL_LIST
             
-            if [ -n "$HEADER_DEB_FILE" ] && [ -f "$HEADER_DEB_FILE" ]; then
-                echo "正在安装头文件..."
-                sudo dpkg -i "$HEADER_DEB_FILE"
-            fi
-            
-           # 尝试修复依赖
+            # 尝试修复可能的其他依赖
             sudo apt-get install -f -y 
 
-            # --- 新增：安全检查逻辑 (开始) ---
+            # --- 安全检查逻辑 ---
             echo "正在严格验证内核是否安装成功..."
-            
-            # 逻辑说明：
-            # 1. dpkg -l 列出包
-            # 2. grep "^ii" 筛选出已成功安装的包
-            # 3. grep "linux-image" 找内核包
-            # 4. grep "${SELECTED_VERSION}" 确认版本号包含我们要装的那个
-            
             if ! dpkg -l | grep "^ii" | grep "linux-image" | grep -q "${SELECTED_VERSION}"; then
                 echo -e "\n${Error} 【危险警告】内核安装失败！"
                 echo -e "${Error} 系统包管理器可能因依赖错误已自动移除了目标内核。"
                 echo -e "${Error} 为了防止重启失联，脚本将【终止运行】，**绝对不会**更新 GRUB 引导。"
-                echo -e "${Tip} 你的系统引导未被修改，重启是安全的（将进入旧内核）。"
-                echo -e "${Tip} 请尝试选择其他稳定版本（如 6.1.x 或 5.10.x）。\n"
+                echo -e "${Tip} 你的系统引导未被修改，重启是安全的。"
                 
-                # 清理文件并直接退出函数，不执行后面的 BBR_grub
-                rm -f "$IMAGE_DEB_FILE" "$HEADER_DEB_FILE" "$VERSION_MAP_FILE"
+                # 清理
+                rm -f "$IMAGE_DEB_FILE" "$COMMON_HEADER_FILE" "$ARCH_HEADER_FILE" "$VERSION_MAP_FILE"
                 return 1
             else
                 echo -e "${Info} 验证通过：内核 ${SELECTED_VERSION} 已成功安装。"
             fi
-            # --- 新增：安全检查逻辑 (结束) ---
 
             # 清理
-            rm -f "$IMAGE_DEB_FILE" "$HEADER_DEB_FILE" "$VERSION_MAP_FILE"
-            # --- 修复逻辑结束 ---
+            rm -f "$IMAGE_DEB_FILE" "$COMMON_HEADER_FILE" "$ARCH_HEADER_FILE" "$VERSION_MAP_FILE"
     fi
 
-    # 只有通过了上面的检查，才会执行这里
     BBR_grub
     echo -e "${Tip} 内核安装完毕，请参考上面的信息检查是否安装成功,默认从排第一的高版本内核启动"
     check_kernel
