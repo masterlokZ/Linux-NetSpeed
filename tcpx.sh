@@ -961,7 +961,7 @@ installcloud() {
 	fi
 
 	echo "检测到架构 $ARCH，获取版本列表..."
-	local DEB_FILES_RAW=$(curl -s "$IMAGE_URL" | grep -oP "$IMAGE_PATTERN")
+	local DEB_FILES_RAW=$(curl -sL "$IMAGE_URL" | grep -oP "$IMAGE_PATTERN")
 	>"$VERSION_MAP_FILE"
 	while IFS= read -r file; do
 		if [[ "$file" =~ linux-image-([0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9]+)?) ]]; then
@@ -980,7 +980,6 @@ installcloud() {
 	echo "【提示】Debian 12 安装 6.12+ 版本脚本将自动配置 GCC-14 环境。"
 	read -t 10 -p "输入选项编号或'h' (默认最新): " CHOICE
 
-	# 处理输入
 	local USE_APT=false
 	if [[ "$CHOICE" =~ ^[hH]$ ]]; then
 		USE_APT=true
@@ -995,38 +994,21 @@ installcloud() {
 	local IMAGE_DEB_FILE=$(grep "^$SELECTED_VERSION:" "$VERSION_MAP_FILE" | tail -n 1 | cut -d':' -f2)
 	kernel_version=$SELECTED_VERSION
 
-    # --- 核心修改：环境检测与 GCC-14 自动配置函数 ---
+    # --- 环境配置函数 ---
     ensure_gcc14_env() {
-        # 只有当内核版本大于 6.1 且系统是 debian 12 (bookworm) 时才执行
-        if [[ "$SELECTED_VERSION" =~ ^6\.(1[2-9]|[2-9]) ]] && grep -q "bookworm" /etc/os-release; then
-            echo ">> 检测到 Debian 12 正在安装高版本内核，准备配置 GCC-14 环境..."
+        if [[ "$SELECTED_VERSION" =~ ^6\.(1[2-9]|[2-9]) ]] && grep -qE "bookworm|12" /etc/os-release; then
+            echo ">> 准备配置 GCC-14 环境..."
+            if dpkg -l | grep -q "gcc-14"; then return; fi
             
-            if dpkg -l | grep -q "gcc-14"; then
-                echo ">> GCC-14 已安装，跳过配置。"
-                return
-            fi
-
-            echo ">> 正在安全添加 Sid 源 (已开启优先级锁定，不会升级系统)..."
-            
-            # 1. 添加 Sid 源
+            echo ">> 添加临时源..."
             echo 'deb http://deb.debian.org/debian sid main' > /etc/apt/sources.list.d/sid-safe-install.list
-            
-            # 2. 关键：设置 Pinning 优先级为 100 (低优先级)
-            # 这确保了 apt update/upgrade 永远不会自动从 sid 拉取包，除非我们显式指定
             cat > /etc/apt/preferences.d/sid-safe-install <<EOF
 Package: *
 Pin: release n=sid
 Pin-Priority: 100
 EOF
-            
-            # 3. 更新并安装
             sudo apt update
-            echo ">> 正在从 Sid 源安装 GCC-14..."
-            # 使用 -t sid 临时覆盖优先级只针对这一个命令
             sudo apt install -y -t sid gcc-14
-            
-            # 4. (可选) 安装完成后保留源以便依赖检查，或者在脚本最后清理
-            # 为了稳妥，这里先保留，函数结束前清理
         fi
     }
 
@@ -1036,33 +1018,39 @@ EOF
             if [ "$ARCH" == "x86_64" ]; then sudo apt install -y "linux-image-cloud-amd64" "linux-headers-cloud-amd64"
             elif [ "$ARCH" == "aarch64" ]; then sudo apt install -y "linux-image-cloud-arm64" "linux-headers-cloud-arm64" ; fi
     else
-            # --- 自动处理依赖环境 ---
             ensure_gcc14_env
 
-            echo "正在准备下载内核文件 (版本: $SELECTED_VERSION)..."
-
-            # 1. 下载 Image
+            echo "正在下载内核 (版本: $SELECTED_VERSION)..."
             if ! curl -fSL -O "$IMAGE_URL$IMAGE_DEB_FILE"; then echo "下载 Image 失败。" ; rm -f "$VERSION_MAP_FILE" ; exit 1 ; fi
 
-            # 2. 匹配 Headers/Kbuild
-            local SEARCH_VER=$(echo "$SELECTED_VERSION" | sed 's/-cloud-amd64//' | sed 's/-cloud-arm64//')
-            echo ">> 搜索 Headers/Kbuild..."
-            local LINUX_DIR_LIST=$(curl -s "$HEADERS_URL")
+            # --- 修复核心：转义加号 (+) ---
+            local RAW_VER=$(echo "$SELECTED_VERSION" | sed 's/-cloud-amd64//' | sed 's/-cloud-arm64//')
+            # 关键修复：将 6.12.57+deb13 转换为 6.12.57\+deb13 以适应正则搜索
+            local SEARCH_VER=$(echo "$RAW_VER" | sed 's/+/\\+/g')
+
+            echo ">> 正在搜索匹配的 Headers/Kbuild (关键词: $RAW_VER)..."
+            local LINUX_DIR_LIST=$(curl -sL "$HEADERS_URL")
             
+            # 使用转义后的 SEARCH_VER 进行搜索
             local COMMON_HEADER_FILE=$(echo "$LINUX_DIR_LIST" | grep -oP "linux-headers-${SEARCH_VER}-common_[^\"]+_all\.deb" | sort -V | tail -n 1)
             local KBUILD_FILE=$(echo "$LINUX_DIR_LIST" | grep -oP "linux-kbuild-${SEARCH_VER}_[^\"]+_amd64\.deb" | sort -V | tail -n 1)
-            local ARCH_HEADER_FILE=$(echo "$LINUX_DIR_LIST" | grep -oP "linux-headers-${SEARCH_VER}-cloud-amd64_[^\"]+_amd64\.deb" | sort -V | tail -n 1)
-
-            if [ "$ARCH" == "aarch64" ]; then
+            local ARCH_HEADER_FILE=""
+            
+            if [ "$ARCH" == "x86_64" ]; then
+                ARCH_HEADER_FILE=$(echo "$LINUX_DIR_LIST" | grep -oP "linux-headers-${SEARCH_VER}-cloud-amd64_[^\"]+_amd64\.deb" | sort -V | tail -n 1)
+            elif [ "$ARCH" == "aarch64" ]; then
                 KBUILD_FILE=$(echo "$LINUX_DIR_LIST" | grep -oP "linux-kbuild-${SEARCH_VER}_[^\"]+_arm64\.deb" | sort -V | tail -n 1)
                 ARCH_HEADER_FILE=$(echo "$LINUX_DIR_LIST" | grep -oP "linux-headers-${SEARCH_VER}-cloud-arm64_[^\"]+_arm64\.deb" | sort -V | tail -n 1)
             fi
 
-            [ -n "$COMMON_HEADER_FILE" ] && curl -fSL -O "$HEADERS_URL$COMMON_HEADER_FILE"
-            [ -n "$KBUILD_FILE" ] && curl -fSL -O "$HEADERS_URL$KBUILD_FILE"
-            [ -n "$ARCH_HEADER_FILE" ] && curl -fSL -O "$HEADERS_URL$ARCH_HEADER_FILE"
+            # 检查是否找到了文件
+            if [ -z "$COMMON_HEADER_FILE" ]; then echo "警告：未找到 Common Headers，可能版本号正则匹配失败。" ; fi
+            if [ -z "$ARCH_HEADER_FILE" ]; then echo "警告：未找到 Arch Headers。" ; fi
 
-            # 3. 安装
+            [ -n "$COMMON_HEADER_FILE" ] && { echo ">> 下载: $COMMON_HEADER_FILE"; curl -fSL -O "$HEADERS_URL$COMMON_HEADER_FILE"; }
+            [ -n "$KBUILD_FILE" ] && { echo ">> 下载: $KBUILD_FILE"; curl -fSL -O "$HEADERS_URL$KBUILD_FILE"; }
+            [ -n "$ARCH_HEADER_FILE" ] && { echo ">> 下载: $ARCH_HEADER_FILE"; curl -fSL -O "$HEADERS_URL$ARCH_HEADER_FILE"; }
+
             echo ">> 开始安装..."
             ensure_cloud_predepends "$IMAGE_DEB_FILE"
             
@@ -1071,27 +1059,28 @@ EOF
             [ -f "$KBUILD_FILE" ] && INSTALL_LIST="$INSTALL_LIST $KBUILD_FILE"
             [ -f "$ARCH_HEADER_FILE" ] && INSTALL_LIST="$INSTALL_LIST $ARCH_HEADER_FILE"
 
-            echo "执行 dpkg 安装..."
+            echo "执行安装..."
             sudo dpkg -i $INSTALL_LIST
-            # 再次尝试解决依赖，如果有 GCC 问题，前面的 ensure_gcc14_env 应该已经解决了一大半
             sudo apt-get install -f -y 
 
-            # --- 清理 Sid 源 (保持系统纯净) ---
+            # 清理源
             if [ -f "/etc/apt/sources.list.d/sid-safe-install.list" ]; then
-                echo ">> 清理临时 Sid 源..."
-                rm -f /etc/apt/sources.list.d/sid-safe-install.list
-                rm -f /etc/apt/preferences.d/sid-safe-install
+                rm -f /etc/apt/sources.list.d/sid-safe-install.list /etc/apt/preferences.d/sid-safe-install
                 sudo apt update >/dev/null 2>&1
             fi
 
-            # --- 验证 ---
             echo "正在验证..."
             if ! dpkg -l | grep "^ii" | grep "linux-image" | grep -q "${SELECTED_VERSION}"; then
-                echo -e "\n${Error} 内核安装失败。已恢复系统源配置。"
+                echo -e "\n${Error} 安装失败。"
                 rm -f "$IMAGE_DEB_FILE" "$COMMON_HEADER_FILE" "$ARCH_HEADER_FILE" "$KBUILD_FILE" "$VERSION_MAP_FILE"
                 return 1
             else
-                echo -e "${Info} 验证通过：内核 ${SELECTED_VERSION} 已安装。"
+                # 额外验证 headers 是否安装
+                if dpkg -l | grep "^ii" | grep "linux-headers" | grep -q "${SELECTED_VERSION}"; then
+                    echo -e "${Info} 验证通过：内核与头文件均已安装成功！"
+                else
+                     echo -e "${Info} 内核安装成功，但头文件可能未安装 (请检查下载日志)。"
+                fi
             fi
             
             rm -f "$IMAGE_DEB_FILE" "$COMMON_HEADER_FILE" "$ARCH_HEADER_FILE" "$KBUILD_FILE" "$VERSION_MAP_FILE"
