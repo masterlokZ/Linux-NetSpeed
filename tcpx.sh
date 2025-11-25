@@ -948,23 +948,29 @@ installcloud() {
 	# --- 定义下载源 ---
 	local IMAGE_URL
 	local IMAGE_PATTERN
+	# 这是一个包含所有内核相关包的巨大列表页面
 	local HEADERS_URL="https://deb.debian.org/debian/pool/main/l/linux/"
 
 	if [ "$ARCH" == "x86_64" ]; then
 		IMAGE_URL="https://deb.debian.org/debian/pool/main/l/linux-signed-amd64/"
 		IMAGE_PATTERN='linux-image-[^"]+cloud-amd64_[^"]+_amd64\.deb'
+		ARCH_TAG="amd64"
 	elif [ "$ARCH" == "aarch64" ]; then
 		IMAGE_URL="https://deb.debian.org/debian/pool/main/l/linux-signed-arm64/"
 		IMAGE_PATTERN='linux-image-[^"]+cloud-arm64_[^"]+_arm64\.deb'
+		ARCH_TAG="arm64"
 	else
 		echo "不支持的架构：$ARCH" ; exit 1
 	fi
 
-	echo "检测到架构 $ARCH，获取版本列表..."
+	echo "检测到架构 $ARCH，正在获取内核版本列表..."
+	
+	# 获取 Image 列表
 	local DEB_FILES_RAW=$(curl -sL "$IMAGE_URL" | grep -oP "$IMAGE_PATTERN")
 	>"$VERSION_MAP_FILE"
 	while IFS= read -r file; do
-		if [[ "$file" =~ linux-image-([0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9]+)?) ]]; then
+		# 提取纯版本号 (例如 6.12.57+deb13)
+		if [[ "$file" =~ linux-image-([0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9]+)?(\+[a-zA-Z0-9]+)?) ]]; then
 			local ver="${BASH_REMATCH[1]}"
 			echo "$ver:$file" >>"$VERSION_MAP_FILE"
 		fi
@@ -977,7 +983,7 @@ installcloud() {
 	for i in "${!VERSIONS[@]}"; do echo "  $i) [${VERSIONS[$i]}]" ; done
 
 	local DEFAULT_INDEX=$((${#VERSIONS[@]} - 1))
-	echo "【提示】Debian 12 安装 6.12+ 版本脚本将自动配置 GCC-14 环境。"
+	echo "【提示】Debian 12 用户安装 6.12+ 版本脚本会自动配置 GCC-14。"
 	read -t 10 -p "输入选项编号或'h' (默认最新): " CHOICE
 
 	local USE_APT=false
@@ -994,13 +1000,12 @@ installcloud() {
 	local IMAGE_DEB_FILE=$(grep "^$SELECTED_VERSION:" "$VERSION_MAP_FILE" | tail -n 1 | cut -d':' -f2)
 	kernel_version=$SELECTED_VERSION
 
-    # --- 环境配置函数 ---
+    # --- 环境配置: GCC-14 (针对 Debian 12 安装高版本内核) ---
     ensure_gcc14_env() {
         if [[ "$SELECTED_VERSION" =~ ^6\.(1[2-9]|[2-9]) ]] && grep -qE "bookworm|12" /etc/os-release; then
-            echo ">> 准备配置 GCC-14 环境..."
+            echo ">> [环境准备] 检测到高版本内核，正在临时配置 GCC-14 依赖..."
             if dpkg -l | grep -q "gcc-14"; then return; fi
             
-            echo ">> 添加临时源..."
             echo 'deb http://deb.debian.org/debian sid main' > /etc/apt/sources.list.d/sid-safe-install.list
             cat > /etc/apt/preferences.d/sid-safe-install <<EOF
 Package: *
@@ -1015,75 +1020,87 @@ EOF
     if [ "$USE_APT" = true ]; then
             echo "使用 apt 安装..."
             sudo apt update
-            if [ "$ARCH" == "x86_64" ]; then sudo apt install -y "linux-image-cloud-amd64" "linux-headers-cloud-amd64"
-            elif [ "$ARCH" == "aarch64" ]; then sudo apt install -y "linux-image-cloud-arm64" "linux-headers-cloud-arm64" ; fi
+            sudo apt install -y "linux-image-cloud-${ARCH_TAG}" "linux-headers-cloud-${ARCH_TAG}"
     else
             ensure_gcc14_env
 
-            echo "正在下载内核 (版本: $SELECTED_VERSION)..."
-            if ! curl -fSL -O "$IMAGE_URL$IMAGE_DEB_FILE"; then echo "下载 Image 失败。" ; rm -f "$VERSION_MAP_FILE" ; exit 1 ; fi
+            echo "--------------------------------------------------------"
+            echo "正在模拟手动下载模式 (Image + Common Headers + Arch Headers)"
+            echo "目标版本: $SELECTED_VERSION"
+            echo "--------------------------------------------------------"
 
-            # --- 修复核心：转义加号 (+) ---
-            local RAW_VER=$(echo "$SELECTED_VERSION" | sed 's/-cloud-amd64//' | sed 's/-cloud-arm64//')
-            # 关键修复：将 6.12.57+deb13 转换为 6.12.57\+deb13 以适应正则搜索
-            local SEARCH_VER=$(echo "$RAW_VER" | sed 's/+/\\+/g')
+            # 1. 下载内核 (Image)
+            echo ">> [1/3] 下载内核 Image..."
+            if ! curl -fSL -O "$IMAGE_URL$IMAGE_DEB_FILE"; then echo "下载失败。" ; rm -f "$VERSION_MAP_FILE" ; exit 1 ; fi
 
-            echo ">> 正在搜索匹配的 Headers/Kbuild (关键词: $RAW_VER)..."
-            local LINUX_DIR_LIST=$(curl -sL "$HEADERS_URL")
+            # 2. 计算搜索关键词
+            # 逻辑：如果版本是 6.12.57+deb13-cloud-amd64，去掉后缀得到 6.12.57+deb13
+            # 然后去 html 里找 linux-headers-6.12.57+deb13-common 和 linux-headers-6.12.57+deb13-cloud-amd64
             
-            # 使用转义后的 SEARCH_VER 进行搜索
-            local COMMON_HEADER_FILE=$(echo "$LINUX_DIR_LIST" | grep -oP "linux-headers-${SEARCH_VER}-common_[^\"]+_all\.deb" | sort -V | tail -n 1)
-            local KBUILD_FILE=$(echo "$LINUX_DIR_LIST" | grep -oP "linux-kbuild-${SEARCH_VER}_[^\"]+_amd64\.deb" | sort -V | tail -n 1)
-            local ARCH_HEADER_FILE=""
-            
-            if [ "$ARCH" == "x86_64" ]; then
-                ARCH_HEADER_FILE=$(echo "$LINUX_DIR_LIST" | grep -oP "linux-headers-${SEARCH_VER}-cloud-amd64_[^\"]+_amd64\.deb" | sort -V | tail -n 1)
-            elif [ "$ARCH" == "aarch64" ]; then
-                KBUILD_FILE=$(echo "$LINUX_DIR_LIST" | grep -oP "linux-kbuild-${SEARCH_VER}_[^\"]+_arm64\.deb" | sort -V | tail -n 1)
-                ARCH_HEADER_FILE=$(echo "$LINUX_DIR_LIST" | grep -oP "linux-headers-${SEARCH_VER}-cloud-arm64_[^\"]+_arm64\.deb" | sort -V | tail -n 1)
+            local SEARCH_VER=$(echo "$SELECTED_VERSION" | sed "s/-cloud-${ARCH_TAG}//")
+            # 关键：对 + 号进行转义，用于 grep 搜索
+            local SEARCH_VER_ESCAPED=$(echo "$SEARCH_VER" | sed 's/+/\\+/g')
+
+            echo ">> 获取 Headers 文件列表..."
+            # 下载目录索引页面
+            local HTML_CONTENT=$(curl -sL "$HEADERS_URL")
+
+            # 3. 匹配 Common Headers 文件名
+            echo ">> 正在搜索 Common Headers (匹配: linux-headers-${SEARCH_VER}-common)..."
+            # 使用正则提取 href="filename" 中的 filename
+            local COMMON_DEB=$(echo "$HTML_CONTENT" | grep -oP "href=\"linux-headers-${SEARCH_VER_ESCAPED}-common_[^\"]+_all\.deb\"" | cut -d'"' -f2 | sort -V | tail -n 1)
+
+            # 4. 匹配 Arch Headers 文件名
+            echo ">> 正在搜索 Arch Headers (匹配: linux-headers-${SEARCH_VER}-cloud-${ARCH_TAG})..."
+            local ARCH_DEB=$(echo "$HTML_CONTENT" | grep -oP "href=\"linux-headers-${SEARCH_VER_ESCAPED}-cloud-${ARCH_TAG}_[^\"]+_${ARCH_TAG}\.deb\"" | cut -d'"' -f2 | sort -V | tail -n 1)
+
+            # 5. 下载 Headers
+            if [ -n "$COMMON_DEB" ]; then
+                echo ">> [2/3] 下载 Common Headers: $COMMON_DEB"
+                wget -O "$COMMON_DEB" "$HEADERS_URL$COMMON_DEB"
+            else
+                echo "Error: 未找到 Common Headers 文件，可能官方源尚未同步或版本正则不匹配。"
             fi
 
-            # 检查是否找到了文件
-            if [ -z "$COMMON_HEADER_FILE" ]; then echo "警告：未找到 Common Headers，可能版本号正则匹配失败。" ; fi
-            if [ -z "$ARCH_HEADER_FILE" ]; then echo "警告：未找到 Arch Headers。" ; fi
+            if [ -n "$ARCH_DEB" ]; then
+                echo ">> [3/3] 下载 Arch Headers: $ARCH_DEB"
+                wget -O "$ARCH_DEB" "$HEADERS_URL$ARCH_DEB"
+            else
+                 echo "Error: 未找到 Arch Headers 文件。"
+            fi
 
-            [ -n "$COMMON_HEADER_FILE" ] && { echo ">> 下载: $COMMON_HEADER_FILE"; curl -fSL -O "$HEADERS_URL$COMMON_HEADER_FILE"; }
-            [ -n "$KBUILD_FILE" ] && { echo ">> 下载: $KBUILD_FILE"; curl -fSL -O "$HEADERS_URL$KBUILD_FILE"; }
-            [ -n "$ARCH_HEADER_FILE" ] && { echo ">> 下载: $ARCH_HEADER_FILE"; curl -fSL -O "$HEADERS_URL$ARCH_HEADER_FILE"; }
-
-            echo ">> 开始安装..."
+            # 6. 安装
+            echo ">> 开始安装已下载的文件..."
             ensure_cloud_predepends "$IMAGE_DEB_FILE"
             
-            local INSTALL_LIST="$IMAGE_DEB_FILE"
-            [ -f "$COMMON_HEADER_FILE" ] && INSTALL_LIST="$INSTALL_LIST $COMMON_HEADER_FILE"
-            [ -f "$KBUILD_FILE" ] && INSTALL_LIST="$INSTALL_LIST $KBUILD_FILE"
-            [ -f "$ARCH_HEADER_FILE" ] && INSTALL_LIST="$INSTALL_LIST $ARCH_HEADER_FILE"
+            # 构造安装列表
+            local INSTALL_FILES="$IMAGE_DEB_FILE"
+            [ -f "$COMMON_DEB" ] && INSTALL_FILES="$INSTALL_FILES $COMMON_DEB"
+            [ -f "$ARCH_DEB" ] && INSTALL_FILES="$INSTALL_FILES $ARCH_DEB"
 
-            echo "执行安装..."
-            sudo dpkg -i $INSTALL_LIST
+            echo "执行命令: dpkg -i $INSTALL_FILES"
+            sudo dpkg -i $INSTALL_FILES
+            
+            echo ">> 修复潜在依赖 (自动补全 kbuild/gcc 等)..."
             sudo apt-get install -f -y 
 
-            # 清理源
+            # 清理临时源
             if [ -f "/etc/apt/sources.list.d/sid-safe-install.list" ]; then
                 rm -f /etc/apt/sources.list.d/sid-safe-install.list /etc/apt/preferences.d/sid-safe-install
                 sudo apt update >/dev/null 2>&1
             fi
 
-            echo "正在验证..."
-            if ! dpkg -l | grep "^ii" | grep "linux-image" | grep -q "${SELECTED_VERSION}"; then
-                echo -e "\n${Error} 安装失败。"
-                rm -f "$IMAGE_DEB_FILE" "$COMMON_HEADER_FILE" "$ARCH_HEADER_FILE" "$KBUILD_FILE" "$VERSION_MAP_FILE"
-                return 1
+            # 7. 验证结果
+            echo "--------------------------------------------------------"
+            echo "正在验证安装状态..."
+            if dpkg -l | grep "^ii" | grep "linux-headers" | grep -q "${SELECTED_VERSION}"; then
+                 echo -e "${Info} 完美！内核与头文件均已安装并匹配。"
             else
-                # 额外验证 headers 是否安装
-                if dpkg -l | grep "^ii" | grep "linux-headers" | grep -q "${SELECTED_VERSION}"; then
-                    echo -e "${Info} 验证通过：内核与头文件均已安装成功！"
-                else
-                     echo -e "${Info} 内核安装成功，但头文件可能未安装 (请检查下载日志)。"
-                fi
+                 echo -e "${Error} 警告：内核已安装，但头文件检测失败。"
             fi
             
-            rm -f "$IMAGE_DEB_FILE" "$COMMON_HEADER_FILE" "$ARCH_HEADER_FILE" "$KBUILD_FILE" "$VERSION_MAP_FILE"
+            # 清理文件
+            rm -f "$IMAGE_DEB_FILE" "$COMMON_DEB" "$ARCH_DEB" "$VERSION_MAP_FILE"
     fi
 
     BBR_grub
